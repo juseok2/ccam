@@ -110,8 +110,14 @@ func TestRejectSymlinks(t *testing.T) {
 			if target {
 				root = dst
 			}
-			p := filepath.Join(root, "projects")
-			if err := os.RemoveAll(p); err != nil {
+			// projects/ itself may be a link (a shared history group); a
+			// project folder below it may not.
+			p := filepath.Join(root, "projects", project)
+			if target {
+				if err := os.MkdirAll(filepath.Dir(p), 0700); err != nil {
+					t.Fatal(err)
+				}
+			} else if err := os.RemoveAll(p); err != nil {
 				t.Fatal(err)
 			}
 			outside := t.TempDir()
@@ -122,6 +128,54 @@ func TestRejectSymlinks(t *testing.T) {
 				t.Fatal("followed symlink")
 			}
 		})
+	}
+}
+
+// A shared history group links projects/: a target linked to a group
+// folder receives the copy there, a source linked to one is read through it.
+func TestProjectsLink(t *testing.T) {
+	src, dst, b := fixture(t)
+	group := filepath.Join(t.TempDir(), "group-projects")
+	if err := os.MkdirAll(group, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(group, filepath.Join(dst, "projects")); err != nil {
+		t.Skip(err)
+	}
+	if _, err := Copy(src, dst, b, project, testID, false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(group, project, testID+".jsonl")); err != nil {
+		t.Fatal("copy did not land in the linked folder:", err)
+	}
+	if _, err := Snapshot(dst, project, testID); err != nil {
+		t.Fatal("snapshot through projects link:", err)
+	}
+}
+
+func TestSharedHistoryCopiesNothing(t *testing.T) {
+	src, dst, b := fixture(t)
+	if err := os.Symlink(filepath.Join(src, "projects"), filepath.Join(dst, "projects")); err != nil {
+		t.Skip(err)
+	}
+	if !Shared(src, dst) {
+		t.Fatal("linked projects not reported as shared")
+	}
+	if _, err := Copy(src, dst, b, project, testID, false); err == nil {
+		t.Fatal("copied a conversation onto itself")
+	}
+	if entries, _ := os.ReadDir(b); len(entries) != 0 {
+		t.Fatal("backup written for a shared history")
+	}
+	other := t.TempDir()
+	if Shared(src, other) {
+		t.Fatal("separate folders reported as shared")
+	}
+}
+
+func TestValidID(t *testing.T) {
+	if !ValidID(testID) || ValidID("../"+testID) || ValidID("") {
+		t.Fatal("ValidID")
 	}
 }
 func TestSidecarSymlink(t *testing.T) {

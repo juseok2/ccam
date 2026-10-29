@@ -75,6 +75,64 @@ func canonicalRoot(path string) (string, error) {
 	return filepath.Join(real, filepath.Base(path)), err
 }
 
+// ValidID reports whether id has the shape of a Claude Code session UUID.
+func ValidID(id string) bool { return sessionID.MatchString(id) }
+
+// projectsRoot is root's projects folder, resolved once when it is a link:
+// ccam shares conversation history by linking projects/ to a group folder.
+// Links below it are still rejected.
+func projectsRoot(root string) (string, error) {
+	dir := filepath.Join(root, "projects")
+	info, err := os.Lstat(dir)
+	if err != nil || info.Mode()&os.ModeSymlink == 0 {
+		return dir, nil
+	}
+	return filepath.EvalSymlinks(dir)
+}
+
+// Shared reports whether two profile folders read the same projects folder,
+// so a conversation of one is already the other's and nothing is copied.
+func Shared(a, b string) bool {
+	x, err := projectsRoot(a)
+	if err != nil {
+		return false
+	}
+	y, err := projectsRoot(b)
+	if err != nil {
+		return false
+	}
+	ix, err := os.Stat(x)
+	if err != nil {
+		return false
+	}
+	iy, err := os.Stat(y)
+	return err == nil && os.SameFile(ix, iy)
+}
+
+// Locate checks that root holds conversation id of project as a regular
+// file, without the copy checks Snapshot makes: enough to resume it.
+func Locate(root, project, id string) error {
+	if !validComponent(project) || !ValidID(id) {
+		return fmt.Errorf("invalid project folder or session UUID")
+	}
+	root, err := canonicalRoot(root)
+	if err != nil {
+		return err
+	}
+	projects, err := projectsRoot(root)
+	if err != nil {
+		return err
+	}
+	info, err := os.Lstat(filepath.Join(projects, project, id+".jsonl"))
+	if err != nil {
+		return err
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("not a regular file: %s", id+".jsonl")
+	}
+	return nil
+}
+
 func digest(b []byte) string { return fmt.Sprintf("%x", sha256.Sum256(b)) }
 func validComponent(s string) bool {
 	return s != "" && s != "." && s != ".." && !strings.ContainsAny(s, `/\`)
@@ -90,7 +148,11 @@ func Snapshot(root, project, id string) (*Manifest, error) {
 	if err != nil {
 		return nil, err
 	}
-	base := filepath.Join(root, "projects", project)
+	projects, err := projectsRoot(root)
+	if err != nil {
+		return nil, err
+	}
+	base := filepath.Join(projects, project)
 	if err := plain(base); err != nil {
 		return nil, err
 	}
@@ -205,14 +267,21 @@ func Copy(src, dst, backups, project, id string, dry bool) (backup string, err e
 	if err != nil {
 		return "", err
 	}
+	if Shared(src, dst) {
+		return "", fmt.Errorf("both accounts share conversation history; nothing to copy")
+	}
 	m, err := Snapshot(src, project, id)
 	if err != nil {
 		return "", err
 	}
-	dest := filepath.Join(dst, "projects", project)
 	if err = plain(dst); err != nil {
 		return "", err
 	}
+	projects, err := projectsRoot(dst)
+	if err != nil {
+		return "", err
+	}
+	dest := filepath.Join(projects, project)
 	if err = plain(dest); err != nil {
 		return "", err
 	}

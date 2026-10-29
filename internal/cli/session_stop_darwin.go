@@ -12,24 +12,32 @@ import (
 	"github.com/jhyunwoo/ccam/internal/launcher"
 	"github.com/jhyunwoo/ccam/internal/profile"
 	"github.com/jhyunwoo/ccam/internal/session"
+	"github.com/jhyunwoo/ccam/internal/transfer"
 	"github.com/spf13/cobra"
 )
 
 func addSessionStop(root *cobra.Command, e *env) {
-	var expected, scope string
+	var expected, only, scope string
 	cmd := &cobra.Command{Use: "running <account>", Short: "Inspect tracked local processes; optionally request graceful shutdown", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
+		if only != "" && !transfer.ValidID(only) {
+			return fmt.Errorf("invalid session UUID")
+		}
 		_, prof, err := e.loadProfile(args[0])
 		if err != nil {
 			return err
 		}
 		markers, dir := launcher.SessionDir(e.paths, prof.Name), profile.Dir(e.paths, prof)
-		live := func() []session.Process {
-			if scope == "" {
-				return session.Processes(markers, dir)
+		tracked := func() []session.Process {
+			all := session.Processes(markers, dir)
+			if only != "" {
+				all = session.ForSession(all, only)
 			}
-			return session.InScope(session.Processes(markers, dir), scope)
+			if scope != "" {
+				all = session.InScope(all, scope)
+			}
+			return all
 		}
-		current := live()
+		current := tracked()
 		if !cmd.Flags().Changed("stop-expected") {
 			return json.NewEncoder(e.stdout).Encode(current)
 		}
@@ -46,46 +54,69 @@ func addSessionStop(root *cobra.Command, e *env) {
 				}
 			}
 			if !matched {
-				return fmt.Errorf("실행 세션이 변경되었습니다. 목록을 다시 확인하세요")
-			}
-		}
-		for _, p := range current {
-			// Never signal an arbitrary program solely because a record names it.
-			out, err := exec.Command("/bin/ps", "-p", fmt.Sprint(p.PID), "-o", "comm=").Output()
-			name := filepath.Base(strings.TrimSpace(string(out)))
-			if err != nil || (name != "claude" && name != "ccam") {
-				return fmt.Errorf("PID %d의 Claude 실행 파일을 확인할 수 없어 자동 종료하지 않습니다. 해당 터미널에서 /exit 해주세요", p.PID)
+				return fmt.Errorf("the running sessions changed; review the list again")
 			}
 		}
 		if e.dryRun {
 			return fmt.Errorf("shutdown is not available in dry-run mode")
 		}
+		// Confirm every program before signalling any, so a refusal stops
+		// nothing half-way.
 		for _, p := range current {
-			// Recheck profile membership and start identity immediately before signalling.
-			for _, l := range live() {
-				if l.PID == p.PID && l.Start == p.Start {
-					if err := syscall.Kill(p.PID, syscall.SIGTERM); err != nil && err != syscall.ESRCH {
-						return err
-					}
+			if !isClaude(p.PID) {
+				return fmt.Errorf("could not confirm that PID %d is Claude Code, so nothing was stopped; type /exit in its terminal", p.PID)
+			}
+		}
+		for _, p := range current {
+			// Recheck profile membership, start identity and the program
+			// immediately before signalling: never signal an arbitrary
+			// program solely because a record names it.
+			for _, live := range tracked() {
+				if live.PID != p.PID || live.Start != p.Start {
+					continue
+				}
+				if !isClaude(p.PID) {
+					return fmt.Errorf("could not confirm that PID %d is Claude Code, so it was not stopped; type /exit in its terminal", p.PID)
+				}
+				if err := syscall.Kill(p.PID, syscall.SIGTERM); err != nil && err != syscall.ESRCH {
+					return err
 				}
 			}
 		}
 		deadline := time.Now().Add(20 * time.Second)
 		stillRunning := func() bool {
-			if scope == "" {
+			if only == "" && scope == "" {
 				return launcher.Running(e.paths, prof.Name, dir)
 			}
-			return len(live()) > 0
+			return len(tracked()) > 0
 		}
 		for stillRunning() {
 			if time.Now().After(deadline) {
-				return fmt.Errorf("%s가 아직 종료되지 않았습니다. 강제 종료하지 않았으며 전환을 중단합니다. 터미널에서 /exit 후 다시 시도하세요", prof.Name)
+				return fmt.Errorf("%s is still running; nothing was force-stopped and the switch was cancelled; type /exit in its terminal and retry", prof.Name)
 			}
 			time.Sleep(100 * time.Millisecond)
 		}
 		return json.NewEncoder(e.stdout).Encode([]session.Process{})
 	}}
-	cmd.Flags().StringVar(&scope, "cwd", "", "only processes running in this project folder (or in an unknown folder)")
 	cmd.Flags().StringVar(&expected, "stop-expected", "", "JSON process list previously reviewed; send SIGTERM and wait, never SIGKILL")
+	cmd.Flags().StringVar(&scope, "cwd", "", "only processes running in this project folder (or in an unknown folder)")
+	cmd.Flags().StringVar(&only, "session", "", "only processes that may be writing this conversation (those recording no conversation included)")
 	root.AddCommand(cmd)
+}
+
+// isClaude accepts the native binary (any install, reached through a link or
+// not) and the npm package, which runs as node with Claude Code's cli.js.
+func isClaude(pid int) bool {
+	out, err := exec.Command("/bin/ps", "-p", fmt.Sprint(pid), "-o", "comm=").Output()
+	if err != nil {
+		return false
+	}
+	switch filepath.Base(strings.TrimSpace(string(out))) {
+	case "claude", "ccam":
+		return true
+	case "node":
+		args, err := exec.Command("/bin/ps", "-p", fmt.Sprint(pid), "-o", "args=").Output()
+		return err == nil && strings.Contains(string(args), "@anthropic-ai/claude-code/")
+	}
+	return false
 }

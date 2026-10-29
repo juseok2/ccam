@@ -115,15 +115,41 @@ func TestSessionListJSON(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "broken.jsonl"), []byte("invalid"), 0600); err != nil {
 		t.Fatal(err)
 	}
+	// A conversation that cannot be copied is still listed, with the reason,
+	// so it can at least be resumed in its own account.
+	bad := "87654321-4321-4321-4321-cba987654321"
+	if err := os.WriteFile(filepath.Join(dir, bad+".jsonl"), []byte(`{"type":"user","sessionId":"`+bad+`","cwd":"/tmp/example"}`+"\n{truncated"), 0600); err != nil {
+		t.Fatal(err)
+	}
 	rows := run()
-	if len(rows) != 1 || rows[0]["id"] != id || rows[0]["cwd"] != "/tmp/example" || rows[0]["project"] != "-tmp-example" || rows[0]["updated"] == "" {
+	byID := map[string]map[string]any{}
+	for _, r := range rows {
+		byID[r["id"].(string)] = r
+	}
+	good := byID[id]
+	if len(rows) != 2 || good == nil || good["cwd"] != "/tmp/example" || good["project"] != "-tmp-example" || good["updated"] == "" || good["transferable"] != true || good["reason"] != nil {
 		t.Fatal(rows)
+	}
+	if r := byID[bad]; r == nil || r["transferable"] != false || !strings.Contains(r["reason"].(string), "invalid JSONL") {
+		t.Fatal("untransferable conversation:", r)
 	}
 	if strings.Contains(out.String(), "PRIVATE TRANSCRIPT") {
 		t.Fatal("transcript exposed")
 	}
-	if !strings.Contains(errs.String(), "Skipped") {
-		t.Fatal("missing diagnostics")
+}
+
+func TestProjectCwd(t *testing.T) {
+	data := []byte(`{"cwd":"/Users/me/app"}
+{"cwd":"relative"}
+{"cwd":"/Users/me/app/web"}`)
+	if got := projectCwd(data, "-Users-me-app"); got != "/Users/me/app" {
+		t.Fatal("the folder the project is named after:", got)
+	}
+	if got := projectCwd(data, "-Users-me-other"); got != "/Users/me/app" {
+		t.Fatal("first recorded folder:", got)
+	}
+	if projectName("/Users/me/한글 폴더_v1.2") != "-Users-me-------v1-2" {
+		t.Fatal(projectName("/Users/me/한글 폴더_v1.2"))
 	}
 }
 
@@ -145,7 +171,75 @@ func TestConversationPreview(t *testing.T) {
 		t.Fatal("unicode truncation")
 	}
 	title, preview = conversationPreview([]byte("invalid\n" + `{"type":"user","message":{"content":"<command-name>/exit</command-name>"}}`))
-	if title != "내용 미리보기가 없는 대화" || preview != "" {
+	if title != "" || preview != "" {
 		t.Fatal(title, preview)
+	}
+	_, preview = conversationPreview([]byte(`{"type":"user","message":{"content":"마지막 질문"}}`))
+	if preview != "You: 마지막 질문" {
+		t.Fatal(preview)
+	}
+}
+
+// Accounts sharing conversation history (projects/ linked to one folder):
+// the transfer copies nothing, keeps no backup and prints the resume command.
+func TestSessionTransferSharedHistory(t *testing.T) {
+	t.Setenv("CCAM_HOME", t.TempDir())
+	p := paths.FromEnv()
+	cfg := &config.Config{}
+	a, err := profile.Add(p, cfg, "source")
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := profile.Add(p, cfg, "target")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cfg.Save(p.ConfigFile()); err != nil {
+		t.Fatal(err)
+	}
+	group := filepath.Join(t.TempDir(), "projects")
+	id, proj := "12345678-1234-1234-1234-123456789abc", "-tmp-test"
+	if err := os.MkdirAll(filepath.Join(group, proj), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(group, proj, id+".jsonl"), []byte(`{"type":"user","sessionId":"`+id+`","cwd":"/tmp/test","message":{"content":"hi"}}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	for _, prof := range []*config.Profile{a, b} {
+		_ = os.RemoveAll(filepath.Join(profile.Dir(p, prof), "projects"))
+		if err := os.Symlink(group, filepath.Join(profile.Dir(p, prof), "projects")); err != nil {
+			t.Skip(err)
+		}
+	}
+	var out, errs bytes.Buffer
+	if ExecuteWith([]string{"session", "list", "target", "--json"}, p, strings.NewReader(""), &out, &errs) != 0 {
+		t.Fatal(errs.String())
+	}
+	if !strings.Contains(out.String(), id) || !strings.Contains(out.String(), `"transferable":true`) {
+		t.Fatal("shared conversation not listed:", out.String())
+	}
+	out.Reset()
+	errs.Reset()
+	if ExecuteWith([]string{"session", "transfer", "source", "target", id, "--project-folder", proj}, p, strings.NewReader(""), &out, &errs) != 0 {
+		t.Fatal(errs.String())
+	}
+	if !strings.Contains(out.String(), "nothing to copy") || !strings.Contains(out.String(), "ccam target --resume "+id) {
+		t.Fatal(out.String())
+	}
+	if _, err := os.Stat(filepath.Join(p.State, "session-backups")); !os.IsNotExist(err) {
+		t.Fatal("backup written for a shared history")
+	}
+	// Nothing is copied, so a conversation the copy checks refuse (a cut
+	// last line) still switches.
+	f, err := os.OpenFile(filepath.Join(group, proj, id+".jsonl"), os.O_APPEND|os.O_WRONLY, 0600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = f.WriteString("\n{cut")
+	_ = f.Close()
+	out.Reset()
+	errs.Reset()
+	if ExecuteWith([]string{"session", "transfer", "source", "target", id, "--project-folder", proj}, p, strings.NewReader(""), &out, &errs) != 0 {
+		t.Fatal("shared history refused a conversation it does not copy:", errs.String())
 	}
 }

@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -26,7 +27,7 @@ func sessionCmd(e *env) *cobra.Command {
 	copyCmd := &cobra.Command{
 		Use:   "transfer <from-account> <to-account> <session-uuid>",
 		Short: "Copy a stopped session, preserving both accounts' logins",
-		Long:  "Copy one stopped conversation and its sidecars. Close Claude in both accounts first.\nNever copies login data, changes the default account, or switches on usage limits.\nUse --dry-run to validate without writing. Shared/symlinked projects are refused.",
+		Long:  "Copy one stopped conversation and its sidecars. Quit the Claude Code sessions writing this conversation first.\nNever copies login data, changes the default account, or switches on usage limits.\nUse --dry-run to validate without writing. When both accounts share conversation history nothing is copied.",
 		Args:  cobra.ExactArgs(3),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if inspectRunning && !e.dryRun {
@@ -43,8 +44,14 @@ func sessionCmd(e *env) *cobra.Command {
 			if from.Name == to.Name {
 				return fmt.Errorf("choose two different accounts")
 			}
+			if !transfer.ValidID(args[2]) {
+				return fmt.Errorf("invalid session UUID")
+			}
 			// Serialize transfers; the existing refresh locks also exclude account removal.
 			l, err := lock.TryFlock(filepath.Join(e.paths.Runtime, "session-transfer.lock"))
+			if errors.Is(err, lock.ErrBusy) {
+				return fmt.Errorf("another session transfer is in progress; try again when it ends")
+			}
 			if err != nil {
 				return err
 			}
@@ -59,10 +66,41 @@ func sessionCmd(e *env) *cobra.Command {
 				return err
 			}
 			defer releaseTo()
-			for _, prof := range []*config.Profile{from, to} {
-				if err := refuseRunningIn(e, prof, runningCwd); err != nil && !inspectRunning {
+			// Only processes that may be writing this conversation matter:
+			// the copy reads one conversation and creates new files only.
+			if err := refuseSessionRunning(e, from, args[2]); err != nil && !inspectRunning {
+				return err
+			}
+			if err := refuseSessionRunning(e, to, args[2]); err != nil && !inspectRunning {
+				return err
+			}
+			// --running-cwd also refuses every session in the project folder.
+			if runningCwd != "" {
+				for _, prof := range []*config.Profile{from, to} {
+					if err := refuseRunningIn(e, prof, runningCwd); err != nil && !inspectRunning {
+						return err
+					}
+				}
+			}
+			if transfer.Shared(profile.Dir(e.paths, from), profile.Dir(e.paths, to)) {
+				// Every account reading this history could be writing it. The
+				// switch stops sessions of the two accounts only, so another
+				// account's is refused in the preflight too.
+				for i := range cfg.Profiles {
+					other := &cfg.Profiles[i]
+					if other.Name == from.Name || other.Name == to.Name || !transfer.Shared(profile.Dir(e.paths, from), profile.Dir(e.paths, other)) {
+						continue
+					}
+					if err := refuseSessionRunning(e, other, args[2]); err != nil {
+						return err
+					}
+				}
+				if err := transfer.Locate(profile.Dir(e.paths, from), project, args[2]); err != nil {
 					return err
 				}
+				e.printf("Both accounts share conversation history; nothing to copy.\n")
+				e.printf("In the original project directory, resume explicitly:\n  ccam %s --resume %s\n", to.Name, args[2])
+				return nil
 			}
 			backup, err := transfer.Copy(profile.Dir(e.paths, from), profile.Dir(e.paths, to), filepath.Join(e.paths.State, "session-backups"), project, args[2], e.dryRun)
 			if err != nil {
@@ -82,7 +120,7 @@ func sessionCmd(e *env) *cobra.Command {
 	}
 	copyCmd.Flags().StringVar(&project, "project-folder", "", "Exact folder name under the source profile's projects directory")
 	copyCmd.Flags().BoolVar(&inspectRunning, "inspect-running", false, "preflight files without stopping writers; requires --dry-run; transfer revalidates after shutdown")
-	copyCmd.Flags().StringVar(&runningCwd, "running-cwd", "", "refuse only sessions running in this project folder (or in an unknown folder); others keep running")
+	copyCmd.Flags().StringVar(&runningCwd, "running-cwd", "", "also refuse every session running in this project folder (or in an unknown folder)")
 	_ = copyCmd.MarkFlagRequired("project-folder")
 	verify := &cobra.Command{Use: "verify <backup-directory>", Short: "Verify a saved session backup", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
 		if err := transfer.Verify(args[0]); err != nil {
@@ -99,14 +137,27 @@ func sessionCmd(e *env) *cobra.Command {
 		Project string    `json:"project"`
 		Cwd     string    `json:"cwd"`
 		Updated time.Time `json:"updated"`
+		// Transferable is false when the conversation can be resumed in its
+		// own account but not copied; Reason says why.
+		Transferable bool   `json:"transferable"`
+		Reason       string `json:"reason,omitempty"`
 	}
-	list := &cobra.Command{Use: "list <account>", Short: "List transferable session UUIDs and project folders", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
+	list := &cobra.Command{Use: "list <account>", Short: "List session UUIDs, project folders and whether each can be transferred", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
 		_, prof, err := e.loadProfile(args[0])
 		if err != nil {
 			return err
 		}
 		rows := []sessionRow{}
 		base := filepath.Join(profile.Dir(e.paths, prof), "projects")
+		if info, err := os.Lstat(base); err == nil && info.Mode()&os.ModeSymlink != 0 {
+			// A shared history group links projects/; a broken link must
+			// not read as "no conversations".
+			real, err := filepath.EvalSymlinks(base)
+			if err != nil {
+				return fmt.Errorf("the projects folder of %s is a broken link (%v); check its group with ccam doctor", prof.Name, err)
+			}
+			base = real
+		}
 		entries, err := os.ReadDir(base)
 		if os.IsNotExist(err) {
 			if asJSON {
@@ -130,9 +181,16 @@ func sessionCmd(e *env) *cobra.Command {
 					continue
 				}
 				id := strings.TrimSuffix(f.Name(), ".jsonl")
-				if _, err := transfer.Snapshot(profile.Dir(e.paths, prof), project.Name(), id); err != nil {
-					fmt.Fprintf(e.stderr, "Skipped %q / %q: %v\n", project.Name(), id, err)
+				if !transfer.ValidID(id) {
 					continue
+				}
+				reason := ""
+				if _, err := transfer.Snapshot(profile.Dir(e.paths, prof), project.Name(), id); err != nil {
+					reason = err.Error()
+					if !asJSON {
+						fmt.Fprintf(e.stderr, "Not transferable %q / %q: %v\n", project.Name(), id, err)
+						continue
+					}
 				}
 				if asJSON {
 					path := filepath.Join(base, project.Name(), f.Name())
@@ -144,16 +202,7 @@ func sessionCmd(e *env) *cobra.Command {
 					if err != nil {
 						return err
 					}
-					cwd := ""
-					for _, line := range bytes.Split(data, []byte("\n")) {
-						var row struct {
-							Cwd string `json:"cwd"`
-						}
-						if json.Unmarshal(line, &row) == nil && filepath.IsAbs(row.Cwd) {
-							cwd = row.Cwd
-						}
-					}
-					item := sessionRow{ID: id, Project: project.Name(), Cwd: cwd, Updated: info.ModTime()}
+					item := sessionRow{ID: id, Project: project.Name(), Cwd: projectCwd(data, project.Name()), Updated: info.ModTime(), Transferable: reason == "", Reason: reason}
 					if previews {
 						item.Title, item.Preview = conversationPreview(data)
 					}
@@ -175,7 +224,51 @@ func sessionCmd(e *env) *cobra.Command {
 	return root
 }
 
+// refuseSessionRunning fails when a process of prof may be writing
+// conversation id (see session.ForSession).
+func refuseSessionRunning(e *env, prof *config.Profile, id string) error {
+	running := session.ForSession(session.Processes(launcher.SessionDir(e.paths, prof.Name), profile.Dir(e.paths, prof)), id)
+	if len(running) > 0 {
+		return fmt.Errorf("%s has a Claude Code session that may be writing this conversation (PID %d); quit it first", prof.Name, running[0].PID)
+	}
+	return nil
+}
+
+// projectCwd is the folder to resume in: the recorded cwd whose Claude Code
+// project folder name is project (it names any character but ASCII letters
+// and digits "-"), else the first recorded one. The last cwd may be a
+// subfolder the conversation moved into.
+func projectCwd(data []byte, project string) string {
+	first := ""
+	for _, line := range bytes.Split(data, []byte("\n")) {
+		var row struct {
+			Cwd string `json:"cwd"`
+		}
+		if json.Unmarshal(line, &row) != nil || !filepath.IsAbs(row.Cwd) {
+			continue
+		}
+		if projectName(row.Cwd) == project {
+			return row.Cwd
+		}
+		if first == "" {
+			first = row.Cwd
+		}
+	}
+	return first
+}
+
+func projectName(cwd string) string {
+	return strings.Map(func(r rune) rune {
+		if r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' {
+			return r
+		}
+		return '-'
+	}, cwd)
+}
+
 // Only conversational text is shown: never tool arguments, results or thinking.
+// The latest excerpt starts with "You: " or "Claude: "; the title is empty
+// when the conversation has no text to show (the app words both).
 func conversationPreview(data []byte) (string, string) {
 	var first, latest, summary, custom string
 	for _, line := range bytes.Split(data, []byte("\n")) {
@@ -223,7 +316,7 @@ func conversationPreview(data []byte) (string, string) {
 		if row.Type == "user" && first == "" {
 			first = excerpt(text, 90)
 		}
-		prefix := "나: "
+		prefix := "You: "
 		if row.Type == "assistant" {
 			prefix = "Claude: "
 		}
@@ -235,9 +328,6 @@ func conversationPreview(data []byte) (string, string) {
 	}
 	if custom != "" {
 		title = custom
-	}
-	if title == "" {
-		title = "내용 미리보기가 없는 대화"
 	}
 	return title, latest
 }

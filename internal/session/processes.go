@@ -14,6 +14,28 @@ type Process struct {
 	PID   int    `json:"pid"`
 	Start string `json:"start"`
 	Cwd   string `json:"cwd"`
+	// Session is the conversation Claude Code recorded for the process in
+	// sessions/<pid>.json; empty when only ccam's launch marker names it.
+	Session string `json:"session,omitempty"`
+	// Daemon marks the background-session daemon (daemon.lock): it writes
+	// no conversation itself, its workers record theirs.
+	Daemon bool `json:"daemon,omitempty"`
+}
+
+// ForSession keeps the processes that may be writing conversation id: those
+// recording it, and those recording none (a marker alone cannot rule it out).
+// The daemon is left out: stopping it would end every background session.
+func ForSession(all []Process, id string) []Process {
+	kept := []Process{}
+	for _, p := range all {
+		if p.Daemon {
+			continue
+		}
+		if p.Session == "" || p.Session == id {
+			kept = append(kept, p)
+		}
+	}
+	return kept
 }
 
 func Processes(markers, dir string) []Process {
@@ -42,7 +64,7 @@ func Processes(markers, dir string) []Process {
 			paths = append(paths, filepath.Join(dir, "sessions", entry.Name()))
 		}
 	}
-	for _, path := range paths {
+	for i, path := range paths {
 		if !running(path) {
 			continue
 		}
@@ -51,14 +73,29 @@ func Processes(markers, dir string) []Process {
 			continue
 		}
 		var row struct {
-			PID int    `json:"pid"`
-			Cwd string `json:"cwd"`
+			PID       int    `json:"pid"`
+			Cwd       string `json:"cwd"`
+			SessionID string `json:"sessionId"`
 		}
 		if json.Unmarshal(data, &row) != nil || row.PID == os.Getpid() {
 			continue
 		}
 		if now, ok := StartTime(row.PID); ok {
-			found[row.PID] = Process{PID: row.PID, Start: now, Cwd: row.Cwd}
+			found[row.PID] = Process{PID: row.PID, Start: now, Cwd: row.Cwd, Session: row.SessionID, Daemon: i == 0}
+		}
+	}
+	// A marker without a record is ccam itself when it waits on its claude
+	// (relay, auto_switch): it carries the conversation its child records.
+	for pid, p := range found {
+		if p.Session != "" || p.Daemon {
+			continue
+		}
+		for _, child := range found {
+			if parent, ok := Parent(child.PID); ok && parent == pid && child.Session != "" {
+				p.Session = child.Session
+				found[pid] = p
+				break
+			}
 		}
 	}
 	result := []Process{}
