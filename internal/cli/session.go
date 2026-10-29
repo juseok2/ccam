@@ -18,12 +18,16 @@ import (
 func sessionCmd(e *env) *cobra.Command {
 	root := &cobra.Command{Use: "session", Short: "Back up and manually transfer stopped conversations"}
 	var project string
+	var inspectRunning bool
 	copyCmd := &cobra.Command{
 		Use:   "transfer <from-account> <to-account> <session-uuid>",
 		Short: "Copy a stopped session, preserving both accounts' logins",
 		Long:  "Copy one stopped conversation and its sidecars. Close Claude in both accounts first.\nNever copies login data, changes the default account, or switches on usage limits.\nUse --dry-run to validate without writing. Shared/symlinked projects are refused.",
 		Args:  cobra.ExactArgs(3),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if inspectRunning && !e.dryRun {
+				return fmt.Errorf("--inspect-running requires --dry-run")
+			}
 			cfg, from, err := e.loadProfile(args[0])
 			if err != nil {
 				return err
@@ -51,10 +55,10 @@ func sessionCmd(e *env) *cobra.Command {
 				return err
 			}
 			defer releaseTo()
-			if err := refuseRunning(e, from); err != nil {
+			if err := refuseRunning(e, from); err != nil && !inspectRunning {
 				return err
 			}
-			if err := refuseRunning(e, to); err != nil {
+			if err := refuseRunning(e, to); err != nil && !inspectRunning {
 				return err
 			}
 			backup, err := transfer.Copy(profile.Dir(e.paths, from), profile.Dir(e.paths, to), filepath.Join(e.paths.State, "session-backups"), project, args[2], e.dryRun)
@@ -74,6 +78,7 @@ func sessionCmd(e *env) *cobra.Command {
 		},
 	}
 	copyCmd.Flags().StringVar(&project, "project-folder", "", "Exact folder name under the source profile's projects directory")
+	copyCmd.Flags().BoolVar(&inspectRunning, "inspect-running", false, "preflight files without stopping writers; requires --dry-run; transfer revalidates after shutdown")
 	_ = copyCmd.MarkFlagRequired("project-folder")
 	verify := &cobra.Command{Use: "verify <backup-directory>", Short: "Verify a saved session backup", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
 		if err := transfer.Verify(args[0]); err != nil {
@@ -162,6 +167,7 @@ func sessionCmd(e *env) *cobra.Command {
 	list.Flags().BoolVar(&asJSON, "json", false, "print session metadata as JSON (no message contents)")
 	list.Flags().BoolVar(&previews, "preview", false, "include local conversation title and text excerpts in JSON")
 	root.AddCommand(copyCmd, verify, list)
+	addSessionStop(root, e)
 	return root
 }
 

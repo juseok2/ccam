@@ -18,6 +18,10 @@ struct UsageReport: Decodable {
     var name: String; var status: String; var limits: Limits?
     var source: String?; var at: String?; var error: String?
 }
+struct RunningProcess: Codable, Identifiable {
+    var pid: Int; var start: String; var cwd: String
+    var id: Int { pid }
+}
 struct Conversation: Decodable, Identifiable, Hashable {
     var id: String; var project: String; var cwd: String; var updated: String
     var title: String?; var preview: String?
@@ -98,6 +102,7 @@ func shortTime(_ text: String?) -> String {
     @Published var addName = ""
     @Published var showAdd = false
     @Published var showTransfer = false
+    @Published var running: [String: [RunningProcess]] = [:]
     @Published var projectOverride = ""
     private var sessionGeneration = 0
     var backend: Backend { Backend(home: home) }
@@ -194,6 +199,16 @@ func shortTime(_ text: String?) -> String {
         readyCommand = command([source, "--resume", selected.id], cwd: cwd)
         message = "선택한 대화를 재개할 명령을 준비했습니다."
     }
+    func prepareTransfer() async {
+        await execute {
+            running = [:]
+            for account in [source, target] {
+                let raw = try await backend.run(["session", "running", account])
+                running[account] = try JSONDecoder().decode([RunningProcess].self, from: Data(raw.utf8))
+            }
+            showTransfer = true
+        }
+    }
     func transfer() async {
         guard let conversation = selected, !target.isEmpty, source != target else { return }
         let cwd = conversation.cwd.isEmpty ? projectOverride : conversation.cwd
@@ -203,6 +218,13 @@ func shortTime(_ text: String?) -> String {
         showTransfer = false; readyCommand = nil
         await execute {
             let args = ["session", "transfer", from, to, conversation.id, "--project-folder", conversation.project]
+            // Catch an existing target or invalid files before interrupting work.
+            _ = try await backend.run(["--dry-run"] + args + ["--inspect-running"])
+            for account in [from, to] {
+                message = "\(account)의 실행 세션 종료를 기다리고 있습니다…"
+                let expected = try JSONEncoder().encode(running[account] ?? [])
+                _ = try await backend.run(["session", "running", account, "--stop-expected", String(decoding: expected, as: UTF8.self)])
+            }
             _ = try await backend.run(["--dry-run"] + args)
             let result = try await backend.run(args)
             readyCommand = command([to, "--resume", conversation.id], cwd: cwd)
@@ -302,11 +324,11 @@ struct MainView: View {
                                 Text("계정 선택").tag("")
                                 ForEach(model.accounts.filter {$0.name != model.source}) { Text($0.name).tag($0.name) }
                             }.frame(width: 210)
-                            Button("백업 후 이 계정으로 전환") { model.showTransfer = true }
+                            Button("백업 후 이 계정으로 전환") { Task { await model.prepareTransfer() } }
                                 .buttonStyle(.borderedProminent).tint(.teal)
                                 .disabled(model.selected == nil || model.target.isEmpty || model.source == model.target)
                         }
-                        Text("전환 전 양쪽 계정의 Claude에서 /exit 해주세요. 실행 중이면 복사를 거부하며 강제 종료하지 않습니다.").font(.caption).foregroundStyle(.secondary)
+                        Text("전환 시 두 계정의 실행 세션을 확인하고 종료를 요청합니다. 종료되지 않으면 전환을 중단합니다.").font(.caption).foregroundStyle(.secondary)
                     }.padding(20).background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 14))
                     if model.readyCommand != nil {
                         HStack {
@@ -344,12 +366,23 @@ struct MainView: View {
         .sheet(isPresented: $model.showTransfer) {
             VStack(alignment: .leading, spacing: 18) {
                 Text("\(model.source) → \(model.target)").font(.title2.bold())
-                Text("두 프로필의 Claude를 /exit로 종료했는지 확인하세요. 원본은 보존하고 백업을 검증한 뒤 복사합니다. 대상에 같은 세션이 있으면 중단합니다.")
+                Text("두 프로필의 모든 실행 세션에 정상 종료(SIGTERM)를 요청합니다. 다른 프로젝트의 작업도 중단될 수 있습니다. 종료 확인 후 백업·검증·복사를 진행하며, 종료되지 않으면 전환을 중단합니다.")
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 12) {
+                        ForEach([model.source, model.target], id: \.self) { account in
+                            Text("\(account) · 실행 \(model.running[account]?.count ?? 0)개").font(.headline)
+                            ForEach(model.running[account] ?? []) { process in
+                                Text("PID \(process.pid) · \(process.cwd.isEmpty ? "프로젝트 경로 확인 불가" : process.cwd)").font(.caption).lineLimit(2)
+                            }
+                        }
+                    }.frame(maxWidth: .infinity, alignment: .leading)
+                }.frame(maxHeight: 180)
+                Text("연결한 ccam 폴더의 프로필 기준입니다. 별도 설치나 다른 프로필에서 같은 이메일로 로그인한 세션은 포함하지 않습니다.").font(.caption).foregroundStyle(.secondary)
                 if model.selected?.cwd.isEmpty == true {
                     Button("원래 프로젝트 폴더 선택…") { model.projectOverride = model.projectFolder() ?? "" }
                     Text(model.projectOverride).font(.caption)
                 }
-                HStack { Button("취소") { model.showTransfer = false }; Spacer(); Button("백업 및 전환") { Task { await model.transfer() } }.buttonStyle(.borderedProminent) }
+                HStack { Button("취소") { model.showTransfer = false }; Spacer(); Button("세션 종료 후 백업 및 전환") { Task { await model.transfer() } }.buttonStyle(.borderedProminent) }
             }.padding(28).frame(width: 460)
         }
     }
