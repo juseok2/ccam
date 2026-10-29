@@ -1,6 +1,6 @@
 # ccam 베타 설치·사용 가이드 — AI에게 그대로 전달하기
 
-작성: 2026-10-29 · 대상: macOS + Cursor 통합 터미널 · 배포 상태: 소스 빌드 베타
+작성: 2026-10-29 · 갱신: 2026-10-29(0.2.0) · 대상: macOS + Cursor·VS Code 통합 터미널 · 배포 상태: 소스 빌드 베타
 
 ## 1. 이 문서를 받은 AI에게
 
@@ -10,8 +10,8 @@
 
 - 원본: https://github.com/jhyunwoo/ccam (MIT)
 - 사용할 포크: https://github.com/juseok2/ccam
-- 기능 브랜치: `feat/safe-session-transfer`
-- 이 문서의 재현 기준 커밋: `7c424b4e03c722866fef480ffd9659ad831a1c3f`
+- 기능 브랜치: `feat/macos-account-manager` (macOS 앱·대화별 종료·공유 전환 포함. 옛 `feat/safe-session-transfer`·`7c424b4` 에는 `session running` 이 없다)
+- 이 문서의 재현 기준: 위 브랜치의 최신 커밋(`git log -1` 로 확인해 완료 보고에 적는다)
 - 계정별 로그인 분리, 수동 대화 이전·백업·검증, 선택적인 원본 자동 전환 설정을 제공합니다.
 - 계정 별명 기본값은 `account-a`, `account-b`입니다. 사용자가 원하면 `work`, `personal` 등으로 바꾸되 모든 명령에 일관되게 적용하세요.
 - 기존 `claude`, 기존 `ccam`, 실행 중인 작업을 변경하지 않고 별도 `ccam-beta` 명령을 설치합니다.
@@ -42,8 +42,8 @@
 - 백업 SHA-256 무결성 검사 확인.
 - 원본 자동 전환의 CLI·launcher·E2E 모의 테스트 통과.
 - 실제 계정의 한도 소진으로 자동 전환되는 실사용 상황은 아직 미확인.
-- 긴 코딩 작업, 첨부파일, 모든 도구 상태 복원, Intel Mac 실기기 사용은 별도 검증이 필요.
-- 전체 Go 테스트에서 기존 `migrate` 테스트 3개가 실패했고, 동일 원본 커밋에서도 재현됨. 전체 테스트가 모두 통과했다고 안내하지 말 것.
+- 긴 코딩 작업, 첨부파일, 모든 도구 상태 복원, Intel Mac 실기기 사용은 별도 검증이 필요(앱은 0.2.0부터 Intel 겸용으로 빌드하지만 Intel 실기기 실행은 미확인).
+- 0.2.0 기준 `go test ./...` 전체 통과(2026-10-29, macOS 27 Apple Silicon, Go 1.27.3). 0.1.0의 실패 2건(한글 출력 금지 시험, 서명 없는 sleep 복사본을 쓰던 종료 시험)은 0.2.0에서 고쳤다. 다른 Mac에서는 직접 돌려 결과를 그대로 보고할 것.
 
 ## 3. 설치 전 확인
 
@@ -73,16 +73,16 @@ claude --version
 
 ```sh
 mkdir -p "$HOME/.local/share/ccam-beta"
-git clone --branch feat/safe-session-transfer \
+git clone --branch feat/macos-account-manager \
   https://github.com/juseok2/ccam.git \
   "$HOME/.local/share/ccam-beta/src"
 cd "$HOME/.local/share/ccam-beta/src"
-git checkout --detach 7c424b4e03c722866fef480ffd9659ad831a1c3f
+git log -1 --format='%H %s'    # 완료 보고에 이 커밋을 적는다
 mkdir -p "$HOME/.local/lib/ccam-beta"
 go build -o "$HOME/.local/lib/ccam-beta/ccam" ./cmd/ccam
 ```
 
-커밋을 고정하는 이유는 팀원마다 다른 코드를 설치하지 않기 위해서입니다. 업데이트할 때는 검토한 새 커밋으로 명시적으로 변경합니다. 빌드 실패 시 후속 설치를 중단하세요.
+팀원마다 다른 코드를 설치하지 않도록, 배포 담당이 커밋을 알려 줬으면 `git checkout --detach <그 커밋>` 으로 맞춥니다. 업데이트할 때는 검토한 새 커밋으로 명시적으로 변경합니다. 빌드 실패 시 후속 설치를 중단하세요.
 
 ### 4-2. 매번 설정하지 않아도 되는 실행 명령
 
@@ -149,6 +149,26 @@ ccam-beta list
 AI는 두 프로필의 로그인이 서로 다른지 사용자와 확인합니다. 공유할 결과 문서에서는 이메일을 가리세요. 계정이 이미 있으면 `add`를 반복하지 말고 필요할 때만 `login`을 실행합니다.
 
 `--no-group`은 설정과 대화 기록의 자동 공유를 끕니다. 이번 테스트에서는 그대로 유지합니다. 기존 `~/.claude` 전체를 복사하거나 기존 계정을 로그아웃시키지 마세요.
+
+### 5-1. (선택) 지금 쓰는 Claude와 같은 설정·메모리로 두 번째 계정 쓰기
+
+본인 계정 두 개를 번갈아 쓰면서 훅·CLAUDE.md·스킬·MCP·대화 내역(프로젝트 메모리 포함)을 그대로 쓰려면, 별도 `CCAM_HOME` 이 아니라 **표준 ccam 위치**에서 다음을 한다. 사용자가 요청했을 때만, `--dry-run` 계획을 보여 주고 동의를 받은 뒤 실행한다.
+
+아래 `"$CCAM"` 은 `CCAM_HOME` 없이 부르는 이 포크 바이너리다. `ccam-beta`(전용 폴더)로 하면 `~/.claude` 를 키체인 로그인과 함께 제대로 가져오지 못한다.
+
+```sh
+CCAM="$HOME/.local/lib/ccam-beta/ccam"
+"$CCAM" import ~/.claude --name main                  # 제자리 등록(옮기거나 복사하지 않음, 로그인 그대로)
+"$CCAM" --dry-run group add mine --items mcp,settings,memory,extensions,history --members main --from main
+"$CCAM" group add mine --items mcp,settings,memory,extensions,history --members main --from main --yes
+"$CCAM" add sub --group mine --no-login && "$CCAM" login sub
+```
+
+- 실행 전에 `main`(= `~/.claude`)을 쓰는 Claude 를 모두 종료한다(VS Code 확장 포함). 실행 중이면 `… running; quit Claude Code there first` 로 거부된다.
+- `group add` 는 `~/.claude` 의 해당 항목을 ccam 그룹 폴더로 옮기고 그 자리에 링크를 둔다. 그냥 `claude`(VS Code 확장 포함)도 링크를 따라 같은 파일을 본다. 되돌리기: `"$CCAM" group leave mine main`(각 계정이 사본을 가진다).
+- 대화 내역을 공유하면 계정 전환에 복사가 필요 없다: `"$CCAM" sub --resume <UUID>` 또는 앱의 [이 계정으로 전환].
+- 두 계정에서 **같은 대화를 동시에** 열지 않는다(한 파일에 둘이 쓰게 된다). 앱의 전환은 그 대화를 쓰는 세션만 먼저 종료한다.
+- 로그인 정보(`.credentials.json`·키체인)는 어떤 경우에도 공유되지 않는다.
 
 ## 6. 평소 사용하는 방법
 
@@ -334,9 +354,9 @@ ccam-beta account-a
 
 해당 로그인 대기 명령만 Ctrl+C로 취소하고 `ccam-beta login account-a`를 다시 실행합니다. 새로 열린 링크를 사용합니다. 코드가 있다면 그 실행의 터미널에 넣고 채팅에는 보내지 않습니다.
 
-### `is running; quit ... first`
+### `may be writing this conversation` / `is running; quit ... first`
 
-해당 프로필의 대화를 저장하고 `/exit`로 정상 종료합니다. `ccam-beta agents`로 확인할 수 있습니다. 어떤 프로세스인지 확인하지 않고 `killall claude`를 실행하지 마세요.
+이 대화를 쓰는 세션이 아직 떠 있습니다(0.2.0부터 전환은 그 대화를 쓰는 세션만 봅니다). 해당 터미널에서 `/exit`로 정상 종료합니다. `ccam-beta agents`로 확인할 수 있습니다. 어떤 프로세스인지 확인하지 않고 `killall claude`를 실행하지 마세요.
 
 ### `target session already exists`
 
@@ -344,7 +364,7 @@ ccam-beta account-a
 
 ### `symlink not supported`
 
-history 공유 또는 연결된 프로젝트 폴더일 수 있습니다. 수동 이전 MVP는 프로필 루트 아래의 심볼릭 링크를 거부합니다. 링크를 삭제해 우회하지 말고 공유 구조를 확인하세요.
+0.2.0부터 history 공유(`projects/` 자체가 그룹 폴더 링크)는 따라갑니다: 두 계정이 같은 `projects/` 를 보면 복사 없이 전환하고, 한쪽만 공유 폴더면 그 폴더에 복사합니다. 이 오류는 그 아래(프로젝트 폴더·대화 파일·부속 폴더)가 링크일 때만 납니다. 링크를 삭제해 우회하지 말고 공유 구조를 확인하세요.
 
 ### JSONL 오류, session ID 불일치, 128 MiB 초과
 
