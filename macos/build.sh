@@ -9,9 +9,16 @@ trap 'rm -rf "$ICON_WORK"' EXIT
 swift macos/Icon.swift "$ICON_WORK/AppIcon.iconset"
 iconutil -c icns "$ICON_WORK/AppIcon.iconset" -o "$OUT/Contents/Resources/AppIcon.icns"
 cp LICENSE "$OUT/Contents/Resources/LICENSE"
-go build -o "$OUT/Contents/Resources/ccam" ./cmd/ccam
-swiftc -parse-as-library -O -target "$(uname -m)-apple-macosx13.0" \
-  macos/AccountManager.swift macos/Views.swift macos/App.swift -o "$OUT/Contents/MacOS/CCAM" -framework SwiftUI -framework AppKit -framework UserNotifications
+# One universal app for Apple Silicon and Intel Macs.
+for arch in arm64 amd64; do
+  GOOS=darwin GOARCH=$arch CGO_ENABLED=0 go build -trimpath -o "$ICON_WORK/ccam-$arch" ./cmd/ccam
+done
+lipo -create -output "$OUT/Contents/Resources/ccam" "$ICON_WORK/ccam-arm64" "$ICON_WORK/ccam-amd64"
+for arch in arm64 x86_64; do
+  swiftc -parse-as-library -O -target "$arch-apple-macosx13.0" \
+    macos/AccountManager.swift macos/Views.swift macos/App.swift -o "$ICON_WORK/CCAM-$arch" -framework SwiftUI -framework AppKit -framework UserNotifications
+done
+lipo -create -output "$OUT/Contents/MacOS/CCAM" "$ICON_WORK/CCAM-arm64" "$ICON_WORK/CCAM-x86_64"
 cat > "$OUT/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -22,8 +29,8 @@ cat > "$OUT/Contents/Info.plist" <<'PLIST'
 <key>CFBundleIconFile</key><string>AppIcon</string>
 <key>CFBundleExecutable</key><string>CCAM</string>
 <key>CFBundlePackageType</key><string>APPL</string>
-<key>CFBundleShortVersionString</key><string>0.2.0</string>
-<key>CFBundleVersion</key><string>2</string>
+<key>CFBundleShortVersionString</key><string>0.2.1</string>
+<key>CFBundleVersion</key><string>3</string>
 <key>LSMinimumSystemVersion</key><string>13.0</string>
 <key>NSHighResolutionCapable</key><true/>
 </dict></plist>

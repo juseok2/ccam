@@ -99,7 +99,7 @@ struct MainView: View {
         VStack(alignment: .leading, spacing: 14) {
             Label("CCAM", systemImage: "person.2.badge.key.fill").font(.title2.bold())
             Text("Claude 계정과 대화 관리").font(.callout).foregroundStyle(.secondary)
-            Button { model.addError = nil; model.showAdd = true } label: { Label("계정 추가", systemImage: "plus") }
+            Button { model.openAdd() } label: { Label("계정 추가", systemImage: "plus") }
                 .buttonStyle(.borderedProminent)
             ForEach(model.candidates) { candidate in
                 Button { model.startImport(candidate) } label: { Label("기존 대화 가져오기", systemImage: "tray.and.arrow.down") }
@@ -205,6 +205,7 @@ struct MainView: View {
                     .menuStyle(.borderlessButton).menuIndicator(.hidden).fixedSize().disabled(model.busy)
             }
             Text(account.email?.isEmpty == false ? account.email! : "로그인이 필요합니다").font(.caption).foregroundStyle(.secondary).lineLimit(1)
+            Text(model.shareSummary(account)).font(.caption2).foregroundStyle(.secondary).lineLimit(2)
             Meter(label: "5시간", window: report?.limits?.five_hour)
             Meter(label: "주간", window: report?.limits?.weekly)
             HStack {
@@ -303,6 +304,10 @@ struct MainView: View {
                 if let preview = session.preview, !preview.isEmpty {
                     Text(preview).font(.callout).foregroundStyle(.secondary).lineLimit(2)
                 }
+                if !session.canCopy {
+                    Text("복사는 안 됨 · " + friendly(session.reason ?? "") + " (이어가기와 대화 내역 공유 계정으로 옮기기는 됨)")
+                        .font(.caption).foregroundStyle(.orange).lineLimit(2)
+                }
                 Text(parseTime(session.updated).map(relativeTime) ?? "").font(.caption).foregroundStyle(.secondary)
             }
             Spacer()
@@ -333,7 +338,7 @@ struct MainView: View {
                     if model.opener != .copy { Button("명령 복사") { model.resume(copyOnly: true) } }
                     if model.accounts.count < 2 {
                         Text("다른 계정이 있어야 옮길 수 있습니다").font(.caption).foregroundStyle(.secondary)
-                        Button("계정 추가") { model.addError = nil; model.showAdd = true }
+                        Button("계정 추가") { model.openAdd() }
                     } else {
                         Divider().frame(height: 18)
                         Image(systemName: "arrow.right").foregroundStyle(.secondary).help("다른 계정으로 옮기기")
@@ -344,7 +349,8 @@ struct MainView: View {
                         }.labelsHidden().frame(maxWidth: 190)
                         Button("옮기기…") { Task { await model.prepareTransfer() } }
                             .buttonStyle(.borderedProminent).tint(.teal)
-                            .disabled(model.busy || model.target.isEmpty || model.source == model.target)
+                            .disabled(model.busy || model.target.isEmpty || model.source == model.target
+                                      || (!selected.canCopy && !model.sharedHistory(model.source, model.target)))
                     }
                 }
             }
@@ -397,6 +403,21 @@ struct MainView: View {
             Text("구분할 이름을 정하면 로그인 창이 열립니다. 브라우저에서 로그인을 마치면 앱에 자동으로 반영됩니다.")
                 .fixedSize(horizontal: false, vertical: true)
             nameField($model.addName, error: model.addError) { Task { await model.add() } }
+            Picker("공유", selection: $model.shareChoice) {
+                ForEach(model.groupNames, id: \.self) { Text("\($0) 그룹에 참여").tag(ShareChoice.join($0)) }
+                ForEach(model.accounts.filter { ($0.groups ?? []).isEmpty }) { Text("\($0.name) 계정과 공유하는 새 그룹").tag(ShareChoice.newGroup($0.name)) }
+                Text("공유 안 함 (빈 프로필)").tag(ShareChoice.none)
+            }
+            switch model.shareChoice {
+            case .none:
+                Text("설정·훅·CLAUDE.md·스킬·메모리가 없는 새 프로필로 시작합니다.").font(.caption).foregroundStyle(.secondary)
+            case .join(let group):
+                Text("\(group) 그룹이 공유하는 항목을 함께 씁니다. 로그인은 따로입니다.").font(.caption).foregroundStyle(.secondary)
+            case .newGroup(let owner):
+                Toggle("대화 내역·프로젝트 메모리도 공유 (복사 없이 계정 전환)", isOn: $model.shareHistory)
+                Text("\(owner)의 설정·훅·CLAUDE.md·스킬·MCP\(model.shareHistory ? "·대화 내역" : "")를 공유 폴더로 옮기고 그 자리에 링크를 둡니다. 바뀌는 파일은 ccam이 백업하고, 로그인 정보는 공유하지 않습니다. 먼저 \(owner)를 쓰는 Claude(VS Code 확장·터미널)를 모두 종료하세요.")
+                    .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            }
             HStack {
                 Button("취소") { model.showAdd = false }.keyboardShortcut(.cancelAction)
                 Spacer()
@@ -404,7 +425,7 @@ struct MainView: View {
                     .keyboardShortcut(.defaultAction)
                     .disabled(!isValidName(model.addName) || model.busy)
             }
-        }.padding(26).frame(width: 440)
+        }.padding(26).frame(width: 480)
     }
 
     func importSheet(_ candidate: ImportCandidate) -> some View {
@@ -446,19 +467,21 @@ struct MainView: View {
 
     var transferSheet: some View {
         let accounts = [model.source, model.target]
-        let unknownFolder = model.selected?.cwd.isEmpty == true
+        let unknownFolder = model.selected.map { !isFolder($0.cwd) } ?? false
+        let shared = model.sharedHistory(model.source, model.target)
         let mustStop = accounts.reduce(0) { $0 + (model.running[$1]?.count ?? 0) }
         let otherCount = accounts.reduce(0) { $0 + (model.others[$1]?.count ?? 0) }
         return VStack(alignment: .leading, spacing: 14) {
             Text("\(model.source) → \(model.target)로 대화 옮기기").font(.title2.bold())
-            Text("대화를 백업한 뒤 \(model.target) 계정으로 복사합니다. 원본 대화와 두 계정의 로그인은 그대로 남습니다.")
+            Text(shared ? "두 계정이 대화 내역을 공유하므로 복사 없이 \(model.target) 계정으로 이어갑니다. 두 계정의 로그인은 그대로입니다."
+                        : "대화를 백업한 뒤 \(model.target) 계정으로 복사합니다. 원본 대화와 두 계정의 로그인은 그대로 남습니다.")
                 .fixedSize(horizontal: false, vertical: true)
             ScrollView {
                 VStack(alignment: .leading, spacing: 8) {
                     if mustStop == 0 {
-                        Label("이 프로젝트에서 실행 중인 Claude가 없습니다. 바로 옮길 수 있습니다.", systemImage: "checkmark.circle").foregroundStyle(.teal)
+                        Label("이 대화를 쓰는 Claude가 없습니다. 바로 옮길 수 있습니다.", systemImage: "checkmark.circle").foregroundStyle(.teal)
                     } else {
-                        Text(unknownFolder ? "두 계정에서 실행 중인 Claude \(mustStop)개를 종료합니다" : "이 프로젝트에서 실행 중인 Claude \(mustStop)개를 종료합니다").font(.headline)
+                        Text("이 대화를 쓰는(또는 어느 대화인지 기록이 없는) Claude \(mustStop)개를 종료합니다").font(.headline)
                         ForEach(accounts, id: \.self) { account in
                             if let items = model.running[account], !items.isEmpty {
                                 Text(account).font(.caption.bold())
@@ -468,10 +491,10 @@ struct MainView: View {
                     }
                     if otherCount > 0 {
                         Divider()
-                        Text("다른 프로젝트에서 실행 중 \(otherCount)개").font(.headline)
+                        Text("다른 대화에서 실행 중 \(otherCount)개").font(.headline)
                         ForEach(accounts, id: \.self) { account in processList(model.others[account] ?? []) }
-                        Toggle("다른 프로젝트의 Claude도 함께 종료", isOn: $model.stopOthers)
-                        Text(model.stopOthers ? "모두 종료한 뒤 옮깁니다." : "그대로 두고 이 프로젝트의 Claude만 종료합니다.")
+                        Toggle("다른 대화의 Claude도 함께 종료", isOn: $model.stopOthers)
+                        Text(model.stopOthers ? "모두 종료한 뒤 옮깁니다." : "그대로 두고 이 대화의 Claude만 종료합니다.")
                             .font(.caption).foregroundStyle(.secondary)
                     }
                 }.frame(maxWidth: .infinity, alignment: .leading)
@@ -479,7 +502,7 @@ struct MainView: View {
             if unknownFolder {
                 HStack {
                     Button("원래 프로젝트 폴더 선택…") { model.projectOverride = model.projectFolder() ?? "" }
-                    Text(model.projectOverride.isEmpty ? "대화 기록에 폴더가 없어 직접 골라야 합니다." : model.projectOverride)
+                    Text(model.projectOverride.isEmpty ? (model.selected?.cwd.isEmpty == false ? "기록된 폴더가 없어졌습니다: " + model.selected!.cwd : "대화 기록에 폴더가 없어 직접 골라야 합니다.") : model.projectOverride)
                         .font(.caption).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
                 }
             }

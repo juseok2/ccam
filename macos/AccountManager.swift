@@ -6,6 +6,9 @@ struct Account: Decodable, Identifiable, Hashable {
     var name: String
     var email: String?
     var plan: String?
+    var groups: [String]?
+    var share: [String: String]?   // item → group, or "local"
+    var dir: String?
     var id: String { name }
 }
 struct UsageWindow: Decodable {
@@ -21,13 +24,16 @@ struct UsageReport: Decodable {
 }
 struct RunningProcess: Codable, Identifiable {
     var pid: Int; var start: String; var cwd: String
+    var session: String?
     var id: Int { pid }
 }
 struct Conversation: Decodable, Identifiable, Hashable {
     var id: String; var project: String; var cwd: String; var updated: String
     var title: String?; var preview: String?
+    var transferable: Bool?; var reason: String?
     var key: String { project + "/" + id }
     var folder: String { cwd.isEmpty ? project : cwd }
+    var canCopy: Bool { transferable ?? true }
 }
 struct ImportCandidate: Decodable, Identifiable {
     var path: String; var name: String; var email: String
@@ -86,9 +92,10 @@ struct Backend: Sendable {
         env["PATH"] = Backend.extraPath + ":" + (env["PATH"] ?? "")
         return env
     }
-    func run(_ args: [String]) async throws -> String { try await runFull(args).out }
+    func run(_ args: [String], timeout: TimeInterval? = 90) async throws -> String { try await runFull(args, timeout: timeout).out }
     /// Runs off the main actor. Cancelling the calling task stops the CLI.
-    func runFull(_ args: [String]) async throws -> (out: String, err: String) {
+    /// timeout nil waits for the CLI: a copy must not be cut in half.
+    func runFull(_ args: [String], timeout: TimeInterval? = 90) async throws -> (out: String, err: String) {
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         defer { try? FileManager.default.removeItem(at: dir) }
@@ -105,10 +112,10 @@ struct Backend: Sendable {
         process.standardOutput = stdout; process.standardError = stderr
         try process.run()
         // The CLI itself bounds network requests. A final watchdog avoids a stuck UI.
-        let deadline = Date().addingTimeInterval(90)
+        let deadline = timeout.map { Date().addingTimeInterval($0) }
         while process.isRunning {
             if Task.isCancelled { process.terminate(); throw CancellationError() }
-            if Date() >= deadline {
+            if let deadline, Date() >= deadline {
                 process.terminate()
                 throw AppFailure(message: "응답 시간이 초과되었습니다. 실행 상태를 확인한 뒤 다시 시도하세요.")
             }
@@ -156,6 +163,17 @@ func sourceLabel(_ source: String?) -> String {
     default: return source!
     }
 }
+func isFolder(_ path: String) -> Bool {
+    var isDirectory: ObjCBool = false
+    return path.hasPrefix("/") && FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory) && isDirectory.boolValue
+}
+let shareNames: [(String, String)] = [("settings", "설정·훅"), ("memory", "CLAUDE.md"), ("extensions", "스킬·명령"), ("mcp", "MCP"), ("history", "대화·메모리")]
+/// How a new account shares with the others.
+enum ShareChoice: Hashable {
+    case none
+    case join(String)       // an existing group
+    case newGroup(String)   // a new group filled from this account
+}
 func isValidName(_ name: String) -> Bool {
     name.range(of: "^[a-z0-9][a-z0-9_-]{0,31}$", options: .regularExpression) != nil && Int(name) == nil
 }
@@ -169,6 +187,14 @@ func nameHint(_ name: String) -> String? {
 func friendly(_ raw: String) -> String {
     let rules: [(String, String)] = [
         ("target session already exists", "이 대화는 이미 대상 계정에 있습니다. 대상 계정을 선택하고 대화를 두 번 눌러 이어가세요."),
+        ("the running sessions changed", "실행 중인 Claude 목록이 바뀌었습니다. [옮기기…]를 다시 눌러 확인하세요."),
+        ("could not confirm that PID", "Claude인지 확인할 수 없는 프로세스가 있어 아무것도 종료하지 않았습니다. 그 터미널에서 /exit 하세요."),
+        ("nothing was force-stopped", "20초 안에 끝나지 않아 강제로 끄지 않고 멈췄습니다. 그 터미널에서 /exit 한 뒤 다시 시도하세요."),
+        ("may be writing this conversation", "이 대화를 쓰는 Claude가 아직 실행 중입니다. 그 창에서 /exit 한 뒤 다시 시도하세요."),
+        ("another session transfer is in progress", "다른 옮기기가 진행 중입니다. 끝난 뒤 다시 시도하세요."),
+        ("running; quit Claude Code there first", "그 계정의 Claude가 실행 중이라 공유 설정을 바꿀 수 없습니다. VS Code 확장·터미널의 Claude를 모두 종료한 뒤 다시 시도하세요."),
+        ("broken link", "공유 폴더 연결이 끊어졌습니다. 터미널에서 ccam-team doctor 로 확인하세요."),
+        ("a group named", "같은 이름의 공유 그룹이 이미 있습니다."),
         ("is running; quit", "이 계정에서 Claude가 아직 실행 중입니다. 작업을 마친 뒤 다시 시도하세요."),
         ("session(s) running in", "이 프로젝트에서 Claude가 아직 실행 중입니다. 작업을 마친 뒤 다시 시도하세요."),
         ("another ccam process is using the login", "다른 작업이 이 계정의 로그인을 쓰고 있습니다. 잠시 후 다시 시도하세요."),
@@ -177,7 +203,7 @@ func friendly(_ raw: String) -> String {
         ("is a ccam command", "예약된 단어라 이름으로 쓸 수 없습니다. 다른 이름을 고르세요."),
         ("already exists", "같은 이름의 계정이 이미 있습니다. 다른 이름을 고르세요."),
         ("folder is already registered", "이미 등록된 폴더입니다."),
-        ("symlink not supported", "공유·링크된 프로젝트의 대화는 옮길 수 없습니다."),
+        ("symlink not supported", "링크로 연결된 프로젝트 폴더의 대화는 복사할 수 없습니다."),
         ("session changed while reading", "옮기는 동안 대화가 바뀌었습니다. Claude를 종료한 뒤 다시 시도하세요."),
         ("source changed", "옮기는 동안 대화가 바뀌었습니다. Claude를 종료한 뒤 다시 시도하세요."),
         ("128 MiB", "대화가 너무 커서(128MB 초과) 옮길 수 없습니다."),
@@ -217,6 +243,8 @@ func friendly(_ raw: String) -> String {
     @Published var addName = "" { didSet { if oldValue != addName { addError = nil } } }
     @Published var addError: String?
     @Published var showAdd = false
+    @Published var shareChoice: ShareChoice = .none
+    @Published var shareHistory = true
     @Published var showTransfer = false
     @Published var running: [String: [RunningProcess]] = [:]
     @Published var others: [String: [RunningProcess]] = [:]
@@ -347,7 +375,13 @@ func friendly(_ raw: String) -> String {
             let result = try await backend.runFull(["session", "list", account, "--json", "--preview"])
             let found = try JSONDecoder().decode([Conversation].self, from: Data(result.out.utf8))
             guard generation == sessionGeneration && account == source else { return }
-            sessions = found.sorted { $0.updated > $1.updated }
+            // The CLI speaks English: "You: " is the user's own words.
+            sessions = found.map { s in
+                var s = s
+                if let p = s.preview, p.hasPrefix("You: ") { s.preview = "나: " + p.dropFirst(5) }
+                if s.title?.isEmpty == true { s.title = nil }
+                return s
+            }.sorted { (parseTime($0.updated) ?? .distantPast) > (parseTime($1.updated) ?? .distantPast) }
             skipped = result.err.components(separatedBy: "\n").filter { $0.hasPrefix("Skipped") }.count
         } catch { if generation == sessionGeneration { fail("대화 목록 불러오기", error) } }
     }
@@ -401,14 +435,55 @@ func friendly(_ raw: String) -> String {
         installWrapper()
         Task { await refresh() }
     }
+    /// Both accounts read the same projects folder: a switch copies nothing.
+    func sharedHistory(_ a: String, _ b: String) -> Bool {
+        guard let x = accounts.first(where: { $0.name == a })?.share?["history"],
+              let y = accounts.first(where: { $0.name == b })?.share?["history"] else { return false }
+        return x != "local" && x == y
+    }
+    func shareSummary(_ account: Account) -> String {
+        let items = shareNames.filter { (account.share?[$0.0] ?? "local") != "local" }.map { $0.1 }
+        return items.isEmpty ? "공유 없음 (이 계정 전용 설정)" : "공유: " + items.joined(separator: " · ")
+    }
+    var groupNames: [String] { Array(Set(accounts.flatMap { $0.groups ?? [] })).sorted() }
+    func openAdd() {
+        addError = nil
+        shareChoice = groupNames.first.map { .join($0) } ?? accounts.first.map { .newGroup($0.name) } ?? .none
+        showAdd = true
+    }
     func add() async {
         let name = addName.trimmingCharacters(in: .whitespacesAndNewlines)
         guard isValidName(name) else { addError = nameHint(name); return }
         guard !accounts.contains(where: { $0.name == name }) else { addError = "같은 이름의 계정이 이미 있습니다."; return }
         addError = nil
         var added = false
-        await execute("계정 추가", onError: { self.addError = $0 }) {
-            _ = try await self.backend.run(["add", name, "--no-group", "--no-login"])
+        let choice = shareChoice, history = shareHistory
+        await execute("계정 추가", cancellable: false, onError: { self.addError = $0 }) {
+            switch choice {
+            case .none:
+                _ = try await self.backend.run(["add", name, "--no-group", "--no-login"])
+            case .join(let group):
+                _ = try await self.backend.run(["add", name, "--group", group, "--no-login"])
+            case .newGroup(let owner):
+                // The new account first, so a bad name moves nothing; it is
+                // empty, so joining the group with the owner conflicts with nothing.
+                _ = try await self.backend.run(["add", name, "--no-group", "--no-login"])
+                let items = "mcp,settings,memory,extensions" + (history ? ",history" : "")
+                var n = 1
+                while true {
+                    let group = n == 1 ? "shared" : "shared\(n)"
+                    do {
+                        // The owner's files fill the group; ccam backs up anything replaced.
+                        _ = try await self.backend.run(["group", "add", group, "--items", items, "--members", owner + "," + name, "--from", owner, "--yes"], timeout: nil)
+                        break
+                    } catch {
+                        if error.localizedDescription.contains("a group named"), n < 20 { n += 1; continue }
+                        // Nothing was shared: take back the empty, never logged in account.
+                        _ = try? await self.backend.run(["remove", name, "--yes"])
+                        throw error
+                    }
+                }
+            }
             added = true
         }
         guard added else { return }
@@ -521,7 +596,8 @@ func friendly(_ raw: String) -> String {
         if wrapperReady {
             launch = "~/.local/bin/ccam-team"
         } else {
-            launch = "env CCAM_HOME=" + shellQuote(home) + " CCAM_USER_HOME=\"$HOME\" PATH=" + shellQuote(backend.environment()["PATH"]!) + " " + shellQuote(backend.executable)
+            // The user's PATH stays; ccam's folders only go in front.
+            launch = "env CCAM_HOME=" + shellQuote(home) + " CCAM_USER_HOME=\"$HOME\" PATH=" + shellQuote(Backend.extraPath) + ":\"$PATH\" " + shellQuote(backend.executable)
         }
         return (cwd.map { "cd " + shellQuote($0) + " && " } ?? "") + launch + " " + args.map(shellQuote).joined(separator: " ")
     }
@@ -572,7 +648,8 @@ func friendly(_ raw: String) -> String {
     }
     func resume(_ conversation: Conversation? = nil, copyOnly: Bool = false) {
         guard let conversation = conversation ?? selected else { return }
-        let cwd = conversation.cwd.isEmpty ? projectFolder() : conversation.cwd
+        // A folder that is gone (a removed worktree) is picked again.
+        let cwd = isFolder(conversation.cwd) ? conversation.cwd : projectFolder()
         guard let cwd else { return }
         let text = command([source, "--resume", conversation.id], cwd: cwd)
         do {
@@ -585,34 +662,29 @@ func friendly(_ raw: String) -> String {
 
     func prepareTransfer() async {
         guard let conversation = selected else { return }
-        let scope = conversation.cwd
         await execute("실행 중인 Claude 확인") {
             self.running = [:]; self.others = [:]; self.stopOthers = false; self.projectOverride = ""
             for account in [self.source, self.target] {
+                // Only the sessions that may be writing this conversation must stop
+                // (those recording no conversation included); the rest may keep running.
                 let all = try JSONDecoder().decode([RunningProcess].self, from: Data(try await self.backend.run(["session", "running", account]).utf8))
-                if scope.isEmpty {
-                    self.running[account] = all; self.others[account] = []
-                } else {
-                    let inside = try JSONDecoder().decode([RunningProcess].self, from: Data(try await self.backend.run(["session", "running", account, "--cwd", scope]).utf8))
-                    self.running[account] = inside
-                    self.others[account] = all.filter { p in !inside.contains { $0.pid == p.pid } }
-                }
+                let mine = try JSONDecoder().decode([RunningProcess].self, from: Data(try await self.backend.run(["session", "running", account, "--session", conversation.id]).utf8))
+                self.running[account] = mine
+                self.others[account] = all.filter { p in !mine.contains { $0.pid == p.pid } }
             }
             self.showTransfer = true
         }
     }
     func transfer() async {
         guard let conversation = selected, !target.isEmpty, source != target else { return }
-        let cwd = conversation.cwd.isEmpty ? projectOverride : conversation.cwd
-        var isDirectory: ObjCBool = false
-        guard FileManager.default.fileExists(atPath: cwd, isDirectory: &isDirectory), isDirectory.boolValue, cwd.hasPrefix("/") else { return }
+        let cwd = isFolder(conversation.cwd) ? conversation.cwd : projectOverride
+        guard isFolder(cwd) else { return }
         let from = source, to = target
-        // Sessions in other projects keep running unless the user chose to stop them too.
-        let scoped = !conversation.cwd.isEmpty && !stopOthers
+        // Other conversations keep running unless the user chose to stop them too.
+        let scoped = !stopOthers
         showTransfer = false
         await execute("대화 옮기기") {
-            var args = ["session", "transfer", from, to, conversation.id, "--project-folder", conversation.project]
-            if scoped { args += ["--running-cwd", conversation.cwd] }
+            let args = ["session", "transfer", from, to, conversation.id, "--project-folder", conversation.project]
             // Catch an existing target or invalid files before interrupting work.
             _ = try await self.backend.run(["--dry-run"] + args + ["--inspect-running"])
             for account in [from, to] {
@@ -620,16 +692,21 @@ func friendly(_ raw: String) -> String {
                 if expected.isEmpty { continue }
                 self.message = "\(account) 계정의 Claude가 종료되기를 기다리는 중…"
                 let json = String(decoding: try JSONEncoder().encode(expected), as: UTF8.self)
-                _ = try await self.backend.run(["session", "running", account] + (scoped ? ["--cwd", conversation.cwd] : []) + ["--stop-expected", json])
+                _ = try await self.backend.run(["session", "running", account] + (scoped ? ["--session", conversation.id] : []) + ["--stop-expected", json])
             }
             // Copying is quick and must not be cut in half.
             self.cancellable = false
             _ = try await self.backend.run(["--dry-run"] + args)
-            let result = try await self.backend.run(args)
-            let backup = result.split(separator: "\n").first { $0.hasPrefix("Backup:") }
-                .map { "백업 위치: " + $0.dropFirst(7).trimmingCharacters(in: .whitespaces) } ?? ""
-            self.launch = Launch(title: "\(to) 계정으로 대화를 옮겼습니다", detail: "원본 대화와 두 계정의 로그인은 그대로입니다.\n" + backup, command: self.command([to, "--resume", conversation.id], cwd: cwd))
-            self.message = "백업·복사·검증을 마쳤습니다."
+            let result = try await self.backend.run(args, timeout: nil)
+            if result.contains("nothing to copy") {
+                self.launch = Launch(title: "\(to) 계정으로 전환했습니다", detail: "두 계정이 대화 내역을 공유하므로 복사하지 않았습니다. 같은 대화를 두 계정에서 동시에 열지 마세요.", command: self.command([to, "--resume", conversation.id], cwd: cwd))
+                self.message = "대화 내역 공유 계정으로 전환했습니다."
+            } else {
+                let backup = result.split(separator: "\n").first { $0.hasPrefix("Backup:") }
+                    .map { "백업 위치: " + $0.dropFirst(7).trimmingCharacters(in: .whitespaces) } ?? ""
+                self.launch = Launch(title: "\(to) 계정으로 대화를 옮겼습니다", detail: "원본 대화와 두 계정의 로그인은 그대로입니다.\n" + backup, command: self.command([to, "--resume", conversation.id], cwd: cwd))
+                self.message = "백업·복사·검증을 마쳤습니다."
+            }
             self.source = to
         }
     }
