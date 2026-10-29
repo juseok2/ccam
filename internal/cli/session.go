@@ -1,10 +1,13 @@
 package cli
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/jhyunwoo/ccam/internal/lock"
 	"github.com/jhyunwoo/ccam/internal/profile"
@@ -79,14 +82,25 @@ func sessionCmd(e *env) *cobra.Command {
 		e.printf("Backup verified.\n")
 		return nil
 	}}
+	var asJSON bool
+	type sessionRow struct {
+		ID      string    `json:"id"`
+		Project string    `json:"project"`
+		Cwd     string    `json:"cwd"`
+		Updated time.Time `json:"updated"`
+	}
 	list := &cobra.Command{Use: "list <account>", Short: "List transferable session UUIDs and project folders", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
 		_, prof, err := e.loadProfile(args[0])
 		if err != nil {
 			return err
 		}
+		rows := []sessionRow{}
 		base := filepath.Join(profile.Dir(e.paths, prof), "projects")
 		entries, err := os.ReadDir(base)
 		if os.IsNotExist(err) {
+			if asJSON {
+				return json.NewEncoder(e.stdout).Encode(rows)
+			}
 			return nil
 		}
 		if err != nil {
@@ -106,14 +120,40 @@ func sessionCmd(e *env) *cobra.Command {
 				}
 				id := strings.TrimSuffix(f.Name(), ".jsonl")
 				if _, err := transfer.Snapshot(profile.Dir(e.paths, prof), project.Name(), id); err != nil {
-					e.printf("Skipped %q / %q: %v\n", project.Name(), id, err)
+					fmt.Fprintf(e.stderr, "Skipped %q / %q: %v\n", project.Name(), id, err)
 					continue
 				}
-				e.printf("%s  --project-folder %q\n", id, project.Name())
+				if asJSON {
+					path := filepath.Join(base, project.Name(), f.Name())
+					data, err := os.ReadFile(path)
+					if err != nil {
+						return err
+					}
+					info, err := os.Stat(path)
+					if err != nil {
+						return err
+					}
+					cwd := ""
+					for _, line := range bytes.Split(data, []byte("\n")) {
+						var row struct {
+							Cwd string `json:"cwd"`
+						}
+						if json.Unmarshal(line, &row) == nil && filepath.IsAbs(row.Cwd) {
+							cwd = row.Cwd
+						}
+					}
+					rows = append(rows, sessionRow{ID: id, Project: project.Name(), Cwd: cwd, Updated: info.ModTime()})
+				} else {
+					e.printf("%s  --project-folder %q\n", id, project.Name())
+				}
 			}
+		}
+		if asJSON {
+			return json.NewEncoder(e.stdout).Encode(rows)
 		}
 		return nil
 	}}
+	list.Flags().BoolVar(&asJSON, "json", false, "print session metadata as JSON (no message contents)")
 	root.AddCommand(copyCmd, verify, list)
 	return root
 }
