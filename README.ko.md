@@ -1,3 +1,5 @@
+> Local development branch: safe manual session transfer MVP. See [Cursor terminal guide](docs/SESSION-TRANSFER.ko.md). No new automatic limit-based switching.
+
 # ccam — Claude Code Account Manager (Claude Code 다중 계정 관리)
 
 [English](README.md) · **한국어** · 웹사이트: https://ccam.dev

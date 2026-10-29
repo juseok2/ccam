@@ -234,7 +234,7 @@ func DefaultShare() Share {
 // Reserved holds subcommand names that cannot be profile names,
 // so `ccam <name>` is never ambiguous.
 var Reserved = map[string]bool{
-	"add": true, "list": true, "ls": true, "run": true, "use": true, "next": true,
+	"session": true, "add": true, "list": true, "ls": true, "run": true, "use": true, "next": true,
 	"usage": true, "u": true, "share": true, "mcp": true, "login": true, "logout": true,
 	"rename": true, "remove": true, "rm": true, "import": true, "migrate": true, "doctor": true,
 	"shims": true, "shortcut": true, "completion": true, "help": true, "version": true, "statusline": true,
