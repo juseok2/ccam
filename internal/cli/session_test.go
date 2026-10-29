@@ -126,3 +126,26 @@ func TestSessionListJSON(t *testing.T) {
 		t.Fatal("missing diagnostics")
 	}
 }
+
+func TestConversationPreview(t *testing.T) {
+	data := []byte(`{"type":"user","isMeta":true,"message":{"content":"hidden metadata"}}
+{"type":"user","message":{"content":"재고 화면에서   저장 오류를 고쳐줘"}}
+{"type":"assistant","message":{"content":[{"type":"thinking","thinking":"hidden reasoning"},{"type":"tool_use","input":{"secret":"hidden tool"}},{"type":"text","text":"저장 로직을 수정했습니다.\n테스트도 통과했습니다."}]}}
+{"type":"user","message":{"content":[{"type":"tool_result","content":"hidden result"}]}}`)
+	title, preview := conversationPreview(data)
+	if title != "재고 화면에서 저장 오류를 고쳐줘" || preview != "Claude: 저장 로직을 수정했습니다. 테스트도 통과했습니다." {
+		t.Fatal(title, preview)
+	}
+	data = append(data, []byte("\n"+`{"type":"summary","summary":"재고 저장 오류 수정"}`+"\n"+`{"type":"custom-title","customTitle":"내 재고 작업"}`)...)
+	title, _ = conversationPreview(data)
+	if title != "내 재고 작업" {
+		t.Fatal(title)
+	}
+	if excerpt("가나다라마바사", 3) != "가나다…" {
+		t.Fatal("unicode truncation")
+	}
+	title, preview = conversationPreview([]byte("invalid\n" + `{"type":"user","message":{"content":"<command-name>/exit</command-name>"}}`))
+	if title != "내용 미리보기가 없는 대화" || preview != "" {
+		t.Fatal(title, preview)
+	}
+}

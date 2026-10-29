@@ -20,6 +20,7 @@ struct UsageReport: Decodable {
 }
 struct Conversation: Decodable, Identifiable, Hashable {
     var id: String; var project: String; var cwd: String; var updated: String
+    var title: String?; var preview: String?
     var key: String { project + "/" + id }
 }
 struct AppFailure: LocalizedError {
@@ -133,7 +134,7 @@ func shortTime(_ text: String?) -> String {
         sessions = []; selectedSession = ""; projectOverride = ""; readyCommand = nil
         guard !account.isEmpty else { return }
         do {
-            let raw = try await backend.run(["session", "list", account, "--json"])
+            let raw = try await backend.run(["session", "list", account, "--json", "--preview"])
             let found = try JSONDecoder().decode([Conversation].self, from: Data(raw.utf8))
             guard generation == sessionGeneration && account == source else { return }
             sessions = found.sorted { $0.updated > $1.updated }
@@ -282,7 +283,11 @@ struct MainView: View {
                                 HStack {
                                     Image(systemName: model.selectedSession == session.key ? "checkmark.circle.fill" : "circle").foregroundStyle(.teal)
                                     VStack(alignment: .leading, spacing: 4) {
-                                        Text(session.cwd.isEmpty ? session.project : session.cwd).lineLimit(1).truncationMode(.middle)
+                                        Text(session.title ?? "내용 미리보기가 없는 대화").font(.headline).lineLimit(2)
+                                        if let preview = session.preview, !preview.isEmpty {
+                                            Text(preview).font(.callout).foregroundStyle(.secondary).lineLimit(3)
+                                        }
+                                        Text(session.cwd.isEmpty ? session.project : session.cwd).font(.caption).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
                                         Text(String(session.id.prefix(8)) + " · " + shortTime(session.updated)).font(.caption).foregroundStyle(.secondary)
                                     }
                                     Spacer()

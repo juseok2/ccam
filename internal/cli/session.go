@@ -82,9 +82,11 @@ func sessionCmd(e *env) *cobra.Command {
 		e.printf("Backup verified.\n")
 		return nil
 	}}
-	var asJSON bool
+	var asJSON, previews bool
 	type sessionRow struct {
 		ID      string    `json:"id"`
+		Title   string    `json:"title,omitempty"`
+		Preview string    `json:"preview,omitempty"`
 		Project string    `json:"project"`
 		Cwd     string    `json:"cwd"`
 		Updated time.Time `json:"updated"`
@@ -142,7 +144,11 @@ func sessionCmd(e *env) *cobra.Command {
 							cwd = row.Cwd
 						}
 					}
-					rows = append(rows, sessionRow{ID: id, Project: project.Name(), Cwd: cwd, Updated: info.ModTime()})
+					item := sessionRow{ID: id, Project: project.Name(), Cwd: cwd, Updated: info.ModTime()}
+					if previews {
+						item.Title, item.Preview = conversationPreview(data)
+					}
+					rows = append(rows, item)
 				} else {
 					e.printf("%s  --project-folder %q\n", id, project.Name())
 				}
@@ -154,6 +160,82 @@ func sessionCmd(e *env) *cobra.Command {
 		return nil
 	}}
 	list.Flags().BoolVar(&asJSON, "json", false, "print session metadata as JSON (no message contents)")
+	list.Flags().BoolVar(&previews, "preview", false, "include local conversation title and text excerpts in JSON")
 	root.AddCommand(copyCmd, verify, list)
 	return root
+}
+
+// Only conversational text is shown: never tool arguments, results or thinking.
+func conversationPreview(data []byte) (string, string) {
+	var first, latest, summary, custom string
+	for _, line := range bytes.Split(data, []byte("\n")) {
+		var row struct {
+			Type        string `json:"type"`
+			Summary     string `json:"summary"`
+			CustomTitle string `json:"customTitle"`
+			IsMeta      bool   `json:"isMeta"`
+			Message     struct {
+				Content json.RawMessage `json:"content"`
+			} `json:"message"`
+		}
+		if json.Unmarshal(line, &row) != nil {
+			continue
+		}
+		if row.Type == "summary" {
+			summary = excerpt(row.Summary, 90)
+		}
+		if row.Type == "custom-title" {
+			custom = excerpt(row.CustomTitle, 90)
+		}
+		if row.IsMeta || (row.Type != "user" && row.Type != "assistant") {
+			continue
+		}
+		var text string
+		if json.Unmarshal(row.Message.Content, &text) != nil {
+			var blocks []struct {
+				Type string `json:"type"`
+				Text string `json:"text"`
+			}
+			if json.Unmarshal(row.Message.Content, &blocks) != nil {
+				continue
+			}
+			for _, block := range blocks {
+				if block.Type == "text" {
+					text += " " + block.Text
+				}
+			}
+		}
+		text = strings.TrimSpace(text)
+		// CLI control messages are not useful conversation labels.
+		if text == "" || strings.HasPrefix(text, "<") {
+			continue
+		}
+		if row.Type == "user" && first == "" {
+			first = excerpt(text, 90)
+		}
+		prefix := "나: "
+		if row.Type == "assistant" {
+			prefix = "Claude: "
+		}
+		latest = prefix + excerpt(text, 220)
+	}
+	title := first
+	if summary != "" {
+		title = summary
+	}
+	if custom != "" {
+		title = custom
+	}
+	if title == "" {
+		title = "내용 미리보기가 없는 대화"
+	}
+	return title, latest
+}
+func excerpt(text string, limit int) string {
+	text = strings.Join(strings.Fields(text), " ")
+	chars := []rune(text)
+	if len(chars) > limit {
+		return string(chars[:limit]) + "…"
+	}
+	return text
 }
