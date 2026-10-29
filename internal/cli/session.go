@@ -9,8 +9,11 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jhyunwoo/ccam/internal/config"
+	"github.com/jhyunwoo/ccam/internal/launcher"
 	"github.com/jhyunwoo/ccam/internal/lock"
 	"github.com/jhyunwoo/ccam/internal/profile"
+	"github.com/jhyunwoo/ccam/internal/session"
 	"github.com/jhyunwoo/ccam/internal/transfer"
 	"github.com/spf13/cobra"
 )
@@ -19,6 +22,7 @@ func sessionCmd(e *env) *cobra.Command {
 	root := &cobra.Command{Use: "session", Short: "Back up and manually transfer stopped conversations"}
 	var project string
 	var inspectRunning bool
+	var runningCwd string
 	copyCmd := &cobra.Command{
 		Use:   "transfer <from-account> <to-account> <session-uuid>",
 		Short: "Copy a stopped session, preserving both accounts' logins",
@@ -55,11 +59,10 @@ func sessionCmd(e *env) *cobra.Command {
 				return err
 			}
 			defer releaseTo()
-			if err := refuseRunning(e, from); err != nil && !inspectRunning {
-				return err
-			}
-			if err := refuseRunning(e, to); err != nil && !inspectRunning {
-				return err
+			for _, prof := range []*config.Profile{from, to} {
+				if err := refuseRunningIn(e, prof, runningCwd); err != nil && !inspectRunning {
+					return err
+				}
 			}
 			backup, err := transfer.Copy(profile.Dir(e.paths, from), profile.Dir(e.paths, to), filepath.Join(e.paths.State, "session-backups"), project, args[2], e.dryRun)
 			if err != nil {
@@ -79,6 +82,7 @@ func sessionCmd(e *env) *cobra.Command {
 	}
 	copyCmd.Flags().StringVar(&project, "project-folder", "", "Exact folder name under the source profile's projects directory")
 	copyCmd.Flags().BoolVar(&inspectRunning, "inspect-running", false, "preflight files without stopping writers; requires --dry-run; transfer revalidates after shutdown")
+	copyCmd.Flags().StringVar(&runningCwd, "running-cwd", "", "refuse only sessions running in this project folder (or in an unknown folder); others keep running")
 	_ = copyCmd.MarkFlagRequired("project-folder")
 	verify := &cobra.Command{Use: "verify <backup-directory>", Short: "Verify a saved session backup", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
 		if err := transfer.Verify(args[0]); err != nil {
@@ -244,4 +248,17 @@ func excerpt(text string, limit int) string {
 		return string(chars[:limit]) + "…"
 	}
 	return text
+}
+
+// refuseRunningIn is refuseRunning limited to the sessions that may write a
+// conversation of project cwd. Without cwd it is refuseRunning.
+func refuseRunningIn(e *env, prof *config.Profile, cwd string) error {
+	if cwd == "" {
+		return refuseRunning(e, prof)
+	}
+	markers, dir := launcher.SessionDir(e.paths, prof.Name), profile.Dir(e.paths, prof)
+	if n := len(session.InScope(session.Processes(markers, dir), cwd)); n > 0 {
+		return fmt.Errorf("%s has %d session(s) running in %s; quit them first", prof.Name, n, cwd)
+	}
+	return nil
 }

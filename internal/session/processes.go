@@ -68,3 +68,16 @@ func Processes(markers, dir string) []Process {
 	sort.Slice(result, func(i, j int) bool { return result[i].PID < result[j].PID })
 	return result
 }
+
+// InScope keeps the processes that may write a conversation of project cwd:
+// those running in cwd, and those whose folder is unknown (a launcher marker,
+// the daemon), which are always treated as in scope.
+func InScope(procs []Process, cwd string) []Process {
+	out := []Process{}
+	for _, p := range procs {
+		if p.Cwd == "" || filepath.Clean(p.Cwd) == filepath.Clean(cwd) {
+			out = append(out, p)
+		}
+	}
+	return out
+}

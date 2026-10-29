@@ -21,13 +21,19 @@ type Paths struct {
 
 func FromEnv() Paths {
 	if root := os.Getenv("CCAM_HOME"); root != "" {
+		// CCAM_USER_HOME lets a separate data folder (the macOS app's) still
+		// see the real ~/.claude, for import and its Keychain login.
+		home := os.Getenv("CCAM_USER_HOME")
+		if home == "" {
+			home = filepath.Join(root, "home")
+		}
 		return Paths{
 			Config:  filepath.Join(root, "config"),
 			Data:    filepath.Join(root, "data"),
 			State:   filepath.Join(root, "state"),
 			Bin:     filepath.Join(root, "bin"),
 			Runtime: filepath.Join(root, "run"),
-			Home:    filepath.Join(root, "home"),
+			Home:    home,
 		}
 	}
 	home, _ := os.UserHomeDir()

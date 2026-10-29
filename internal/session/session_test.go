@@ -75,3 +75,11 @@ func TestParentAndExe(t *testing.T) {
 		t.Fatal("the program of a finished process")
 	}
 }
+
+func TestInScopeKeepsProjectAndUnknownFolders(t *testing.T) {
+	procs := []Process{{PID: 2, Cwd: "/p"}, {PID: 3, Cwd: "/other"}, {PID: 4}, {PID: 5, Cwd: "/p/"}}
+	got := InScope(procs, "/p")
+	if len(got) != 3 || got[0].PID != 2 || got[1].PID != 4 || got[2].PID != 5 {
+		t.Fatalf("InScope = %+v", got)
+	}
+}

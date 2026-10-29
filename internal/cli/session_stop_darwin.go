@@ -16,14 +16,20 @@ import (
 )
 
 func addSessionStop(root *cobra.Command, e *env) {
-	var expected string
+	var expected, scope string
 	cmd := &cobra.Command{Use: "running <account>", Short: "Inspect tracked local processes; optionally request graceful shutdown", Args: cobra.ExactArgs(1), RunE: func(cmd *cobra.Command, args []string) error {
 		_, prof, err := e.loadProfile(args[0])
 		if err != nil {
 			return err
 		}
 		markers, dir := launcher.SessionDir(e.paths, prof.Name), profile.Dir(e.paths, prof)
-		current := session.Processes(markers, dir)
+		live := func() []session.Process {
+			if scope == "" {
+				return session.Processes(markers, dir)
+			}
+			return session.InScope(session.Processes(markers, dir), scope)
+		}
+		current := live()
 		if !cmd.Flags().Changed("stop-expected") {
 			return json.NewEncoder(e.stdout).Encode(current)
 		}
@@ -56,8 +62,8 @@ func addSessionStop(root *cobra.Command, e *env) {
 		}
 		for _, p := range current {
 			// Recheck profile membership and start identity immediately before signalling.
-			for _, live := range session.Processes(markers, dir) {
-				if live.PID == p.PID && live.Start == p.Start {
+			for _, l := range live() {
+				if l.PID == p.PID && l.Start == p.Start {
 					if err := syscall.Kill(p.PID, syscall.SIGTERM); err != nil && err != syscall.ESRCH {
 						return err
 					}
@@ -65,7 +71,13 @@ func addSessionStop(root *cobra.Command, e *env) {
 			}
 		}
 		deadline := time.Now().Add(20 * time.Second)
-		for launcher.Running(e.paths, prof.Name, dir) {
+		stillRunning := func() bool {
+			if scope == "" {
+				return launcher.Running(e.paths, prof.Name, dir)
+			}
+			return len(live()) > 0
+		}
+		for stillRunning() {
 			if time.Now().After(deadline) {
 				return fmt.Errorf("%s가 아직 종료되지 않았습니다. 강제 종료하지 않았으며 전환을 중단합니다. 터미널에서 /exit 후 다시 시도하세요", prof.Name)
 			}
@@ -73,6 +85,7 @@ func addSessionStop(root *cobra.Command, e *env) {
 		}
 		return json.NewEncoder(e.stdout).Encode([]session.Process{})
 	}}
+	cmd.Flags().StringVar(&scope, "cwd", "", "only processes running in this project folder (or in an unknown folder)")
 	cmd.Flags().StringVar(&expected, "stop-expected", "", "JSON process list previously reviewed; send SIGTERM and wait, never SIGKILL")
 	root.AddCommand(cmd)
 }

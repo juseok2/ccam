@@ -332,3 +332,20 @@ func TestCopyOfPlainClaudesFolderIsNoticed(t *testing.T) {
 		t.Errorf("doctor: %s", out)
 	}
 }
+
+func TestImportCandidatesListsWithoutImporting(t *testing.T) {
+	c := newTestCLI(t, nil)
+	dir := filepath.Join(c.p.Home, ".claude")
+	writeFiles(t, dir, homeClaude)
+	var rows []struct{ Path, Name string }
+	if err := json.Unmarshal([]byte(c.ok("import", "--candidates")), &rows); err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 || rows[0].Path != dir || rows[0].Name == "" {
+		t.Fatalf("candidates = %+v", rows)
+	}
+	c.ok("import", dir)
+	if out := strings.TrimSpace(c.ok("import", "--candidates")); out != "[]" {
+		t.Fatalf("after import: %s", out)
+	}
+}

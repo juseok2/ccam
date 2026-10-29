@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"encoding/json"
 	"fmt"
 
 	"github.com/spf13/cobra"
@@ -11,7 +12,7 @@ import (
 
 func importCmd(e *env) *cobra.Command {
 	var name string
-	var yes bool
+	var yes, candidates bool
 	cmd := &cobra.Command{
 		Use:   "import [folder]",
 		Short: "Register an existing ~/.claude or ~/.claude-N folder as an account, in place",
@@ -25,6 +26,18 @@ func importCmd(e *env) *cobra.Command {
 			cfg, err := e.load()
 			if err != nil {
 				return err
+			}
+			if candidates {
+				type row struct {
+					Path  string `json:"path"`
+					Name  string `json:"name"`
+					Email string `json:"email"`
+				}
+				rows := []row{}
+				for _, c := range profile.FindCandidates(e.paths, cfg) {
+					rows = append(rows, row{c.Path, c.Name, c.Email})
+				}
+				return json.NewEncoder(e.stdout).Encode(rows)
 			}
 			var paths []string
 			names := map[string]string{}
@@ -102,6 +115,7 @@ func importCmd(e *env) *cobra.Command {
 	}
 	cmd.Flags().StringVar(&name, "name", "", "account name for the folder given (default: derived from the folder name)")
 	cmd.Flags().BoolVarP(&yes, "yes", "y", false, "import every folder found without asking")
+	cmd.Flags().BoolVar(&candidates, "candidates", false, "print the folders that could be imported as JSON, importing nothing")
 	return cmd
 }
 

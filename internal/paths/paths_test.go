@@ -11,9 +11,25 @@ import (
 func TestCCAMHomeOverridesEverything(t *testing.T) {
 	root := t.TempDir()
 	t.Setenv("CCAM_HOME", root)
+	t.Setenv("CCAM_USER_HOME", "")
 	t.Setenv("XDG_CONFIG_HOME", "/nope")
 	p := FromEnv()
 	for _, dir := range []string{p.Config, p.Data, p.State, p.Bin, p.Runtime, p.Home} {
+		if !strings.HasPrefix(dir, root+string(filepath.Separator)) {
+			t.Errorf("%s escapes CCAM_HOME %s", dir, root)
+		}
+	}
+}
+
+func TestCCAMUserHomeKeepsDataInCCAMHome(t *testing.T) {
+	root, home := t.TempDir(), t.TempDir()
+	t.Setenv("CCAM_HOME", root)
+	t.Setenv("CCAM_USER_HOME", home)
+	p := FromEnv()
+	if p.Home != home {
+		t.Errorf("Home = %s, want %s", p.Home, home)
+	}
+	for _, dir := range []string{p.Config, p.Data, p.State, p.Bin, p.Runtime} {
 		if !strings.HasPrefix(dir, root+string(filepath.Separator)) {
 			t.Errorf("%s escapes CCAM_HOME %s", dir, root)
 		}
