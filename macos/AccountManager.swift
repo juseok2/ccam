@@ -8,7 +8,6 @@ struct Account: Decodable, Identifiable, Hashable {
     var plan: String?
     var groups: [String]?
     var share: [String: String]?   // item → group, or "local"
-    var dir: String?
     var id: String { name }
 }
 struct UsageWindow: Decodable {
@@ -25,6 +24,7 @@ struct UsageReport: Decodable {
 struct RunningProcess: Codable, Identifiable {
     var pid: Int; var start: String; var cwd: String
     var session: String?
+    var daemon: Bool?   // the background-session daemon: ends every background session
     var id: Int { pid }
 }
 struct Conversation: Decodable, Identifiable, Hashable {
@@ -195,6 +195,11 @@ func friendly(_ raw: String) -> String {
         ("running; quit Claude Code there first", "그 계정의 Claude가 실행 중이라 공유 설정을 바꿀 수 없습니다. VS Code 확장·터미널의 Claude를 모두 종료한 뒤 다시 시도하세요."),
         ("broken link", "공유 폴더 연결이 끊어졌습니다. 터미널에서 ccam-team doctor 로 확인하세요."),
         ("a group named", "같은 이름의 공유 그룹이 이미 있습니다."),
+        ("empty transcript", "대화 내용이 비어 있습니다."),
+        ("no conversation with matching session ID", "대화 내용이 없습니다."),
+        ("session ID mismatch", "다른 대화의 기록이 섞여 있습니다."),
+        ("not a regular file", "대화 파일이 일반 파일이 아닙니다."),
+        ("sidecar is not a directory", "대화 부속 폴더 형식이 맞지 않습니다."),
         ("is running; quit", "이 계정에서 Claude가 아직 실행 중입니다. 작업을 마친 뒤 다시 시도하세요."),
         ("session(s) running in", "이 프로젝트에서 Claude가 아직 실행 중입니다. 작업을 마친 뒤 다시 시도하세요."),
         ("another ccam process is using the login", "다른 작업이 이 계정의 로그인을 쓰고 있습니다. 잠시 후 다시 시도하세요."),
@@ -448,7 +453,9 @@ func friendly(_ raw: String) -> String {
     var groupNames: [String] { Array(Set(accounts.flatMap { $0.groups ?? [] })).sorted() }
     func openAdd() {
         addError = nil
-        shareChoice = groupNames.first.map { .join($0) } ?? accounts.first.map { .newGroup($0.name) } ?? .none
+        // Moving an account's files into a group is a choice, never the default.
+        shareChoice = groupNames.first.map { .join($0) } ?? .none
+        shareHistory = true
         showAdd = true
     }
     func add() async {
@@ -477,10 +484,13 @@ func friendly(_ raw: String) -> String {
                         _ = try await self.backend.run(["group", "add", group, "--items", items, "--members", owner + "," + name, "--from", owner, "--yes"], timeout: nil)
                         break
                     } catch {
-                        if error.localizedDescription.contains("a group named"), n < 20 { n += 1; continue }
+                        let text = error.localizedDescription
+                        if text.contains("a group named") || text.contains("uses the folder"), n < 20 { n += 1; continue }
                         // Nothing was shared: take back the empty, never logged in account.
-                        _ = try? await self.backend.run(["remove", name, "--yes"])
-                        throw error
+                        let removed = (try? await self.backend.run(["remove", name, "--yes"])) != nil
+                        try? await self.loadAccounts()
+                        if removed { throw error }
+                        throw AppFailure(message: text + "\n\n(" + name + " 계정을 되돌리지 못했습니다. 터미널에서 ~/.local/bin/ccam-team doctor --fix 후 계정을 정리하세요.)")
                     }
                 }
             }

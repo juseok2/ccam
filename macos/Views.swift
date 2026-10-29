@@ -305,7 +305,8 @@ struct MainView: View {
                     Text(preview).font(.callout).foregroundStyle(.secondary).lineLimit(2)
                 }
                 if !session.canCopy {
-                    Text("복사는 안 됨 · " + friendly(session.reason ?? "") + " (이어가기와 대화 내역 공유 계정으로 옮기기는 됨)")
+                    let why = friendly(session.reason ?? "")
+                    Text("복사는 안 됨 · " + (why.hasPrefix("작업을 마치지 못했습니다") ? "형식 검사에 걸림" : why) + " (대화 내역을 공유하는 계정으로는 옮길 수 있음)")
                         .font(.caption).foregroundStyle(.orange).lineLimit(2)
                 }
                 Text(parseTime(session.updated).map(relativeTime) ?? "").font(.caption).foregroundStyle(.secondary)
@@ -415,7 +416,7 @@ struct MainView: View {
                 Text("\(group) 그룹이 공유하는 항목을 함께 씁니다. 로그인은 따로입니다.").font(.caption).foregroundStyle(.secondary)
             case .newGroup(let owner):
                 Toggle("대화 내역·프로젝트 메모리도 공유 (복사 없이 계정 전환)", isOn: $model.shareHistory)
-                Text("\(owner)의 설정·훅·CLAUDE.md·스킬·MCP\(model.shareHistory ? "·대화 내역" : "")를 공유 폴더로 옮기고 그 자리에 링크를 둡니다. 바뀌는 파일은 ccam이 백업하고, 로그인 정보는 공유하지 않습니다. 먼저 \(owner)를 쓰는 Claude(VS Code 확장·터미널)를 모두 종료하세요.")
+                Text("\(owner)의 설정·훅·CLAUDE.md·스킬·MCP\(model.shareHistory ? "·대화 내역" : "") 파일을 공유 폴더로 옮기고 그 자리에 링크를 둡니다. 바뀌는 파일은 ccam이 백업하고, 로그인 정보는 공유하지 않습니다. 먼저 \(owner)를 쓰는 Claude(VS Code 확장·터미널)를 모두 종료하세요.")
                     .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             }
             HStack {
@@ -460,7 +461,7 @@ struct MainView: View {
 
     func processList(_ items: [RunningProcess]) -> some View {
         ForEach(items) { process in
-            Text("· " + (process.cwd.isEmpty ? "폴더를 알 수 없는 Claude" : process.cwd.replacingOccurrences(of: FileManager.default.homeDirectoryForCurrentUser.path, with: "~")))
+            Text("· " + (process.daemon == true ? "백그라운드 세션 관리자 (종료하면 그 계정의 백그라운드 세션이 모두 끝남)" : process.cwd.isEmpty ? "폴더를 알 수 없는 Claude" : process.cwd.replacingOccurrences(of: FileManager.default.homeDirectoryForCurrentUser.path, with: "~")))
                 .font(.caption).lineLimit(1).truncationMode(.middle).help("PID \(process.pid)")
         }
     }
