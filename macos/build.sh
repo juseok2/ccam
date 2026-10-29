@@ -4,6 +4,10 @@ cd "$(dirname "$0")/.."
 OUT="${1:?Usage: macos/build.sh /absolute/path/to/CCAM.app}"
 case "$OUT" in /*.app) ;; *) echo 'Output must be an absolute .app path' >&2; exit 1;; esac
 mkdir -p "$OUT/Contents/MacOS" "$OUT/Contents/Resources"
+ICON_WORK=$(mktemp -d)
+trap 'rm -rf "$ICON_WORK"' EXIT
+swift macos/Icon.swift "$ICON_WORK/AppIcon.iconset"
+iconutil -c icns "$ICON_WORK/AppIcon.iconset" -o "$OUT/Contents/Resources/AppIcon.icns"
 cp LICENSE "$OUT/Contents/Resources/LICENSE"
 go build -o "$OUT/Contents/Resources/ccam" ./cmd/ccam
 swiftc -parse-as-library -O -target "$(uname -m)-apple-macosx13.0" \
@@ -15,6 +19,7 @@ cat > "$OUT/Contents/Info.plist" <<'PLIST'
 <key>CFBundleName</key><string>CCAM</string>
 <key>CFBundleDisplayName</key><string>CCAM 계정 관리</string>
 <key>CFBundleIdentifier</key><string>dev.ccam.desktop.beta</string>
+<key>CFBundleIconFile</key><string>AppIcon</string>
 <key>CFBundleExecutable</key><string>CCAM</string>
 <key>CFBundlePackageType</key><string>APPL</string>
 <key>CFBundleShortVersionString</key><string>0.1.0</string>
